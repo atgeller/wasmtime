@@ -144,6 +144,14 @@ impl TryFrom<wasmparser::FuncType> for WasmFuncType {
     }
 }
 
+impl TryFrom<wasmparser::IndexedFuncType> for WasmFuncType {
+    type Error = WasmError;
+    fn try_from(ty: wasmparser::IndexedFuncType) -> Result<Self, Self::Error> {
+        let ft: wasmparser::FuncType = ty.clone().into();
+        ft.try_into()
+    }
+}
+
 /// Index type of a function (imported or defined) inside the WebAssembly module.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct FuncIndex(u32);

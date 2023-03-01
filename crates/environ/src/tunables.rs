@@ -57,7 +57,7 @@ impl Default for Tunables {
                 //
                 // Coupled with a 2 GiB address space guard it lets us translate
                 // wasm offsets into x86 offsets as aggressively as we can.
-                (0x1_0000, 0x8000_0000)
+                (0x0, 0x0)
             } else if cfg!(target_pointer_width = "32") {
                 // For 32-bit we scale way down to 10MB of reserved memory. This
                 // impacts performance severely but allows us to have more than a
@@ -74,7 +74,7 @@ impl Default for Tunables {
             //
             // Allocate a small guard to optimize common cases but without
             // wasting too much memory.
-            dynamic_memory_offset_guard_size: 0x1_0000,
+            dynamic_memory_offset_guard_size: 0x0,
 
             // We've got lots of address space on 64-bit so use a larger
             // grow-into-this area, but on 32-bit we aren't as lucky.

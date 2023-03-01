@@ -388,6 +388,7 @@ fn compute_addr(
     let base = pos.ins().global_value(addr_ty, heap.base);
 
     let final_base = pos.ins().iadd(base, index);
+
     let final_addr = if offset == 0 {
         final_base
     } else {
