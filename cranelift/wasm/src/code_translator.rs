@@ -825,6 +825,18 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 translate_load_prechk(memarg, ir::Opcode::Load, I64, builder, state, environ)?
             );
         }
+        Operator::F32LoadPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Load, F32, builder, state, environ)?
+            );
+        }
+        Operator::F64LoadPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Load, F64, builder, state, environ)?
+            );
+        }
         Operator::V128Load { memarg } => {
             unwrap_or_return_unreachable_state!(
                 state,
@@ -902,7 +914,9 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
             translate_store(memarg, ir::Opcode::Store, builder, state, environ)?;
         }
         Operator::I32StorePrechk { memarg }
-        | Operator::I64StorePrechk { memarg } => {
+        | Operator::I64StorePrechk { memarg }
+        | Operator::F32StorePrechk { memarg }
+        | Operator::F64StorePrechk { memarg } => {
             translate_store_prechk(memarg, ir::Opcode::Store, builder, state, environ)?;
         }
         Operator::I32Store8Prechk { memarg } | Operator::I64Store8Prechk { memarg } => {
@@ -2537,7 +2551,7 @@ fn prepare_addr_prechk<FE>(
     builder: &mut FunctionBuilder,
     state: &mut FuncTranslationState,
     environ: &mut FE,
-) -> WasmResult<(MemFlags, Offset32, Value)>
+) -> WasmResult<(MemFlags, Value)>
 where
     FE: FuncEnvironment + ?Sized,
 {
@@ -2548,29 +2562,37 @@ where
 
     // If the offset doesn't fit in a u32, fold it into the index
     let offset = match u32::try_from(memarg.offset) {
-        Ok(val) => Offset32::new(val as i32),
+        Ok(val) => val as i64,
         Err(_) => {
             let offset_comp = builder.ins().iconst(heap.index_type, memarg.offset as i64);
             index =
                 builder
                     .ins()
-                    .uadd_overflow_trap(index, offset_comp, ir::TrapCode::HeapOutOfBounds);
-            Offset32::new(0)
+                    .uadd_sat(index, offset_comp);
+            0
         }
     };
 
+    let index = bounds_checks::cast_index_to_pointer_ty(
+        index,
+        heap.index_type,
+        environ.pointer_type(),
+        &mut builder.cursor(),
+    );
+
     let final_base = builder.ins().iadd(base, index);
-    let addr = if memarg.offset == 0 {
+    let addr = if offset == 0 {
         final_base
     } else {
-        builder.ins().iadd_imm(final_base, memarg.offset as i64)
+        builder.ins().iadd_imm(final_base, offset)
     };
 
     let mut flags = MemFlags::new();
     flags.set_endianness(ir::Endianness::Little);
     flags.set_heap();
+    flags.notrap();
 
-    Ok((flags, offset, addr))
+    Ok((flags, addr))
 }
 
 fn align_atomic_addr(
@@ -2678,11 +2700,11 @@ fn translate_load_prechk<FE: FuncEnvironment + ?Sized>(
     state: &mut FuncTranslationState,
     environ: &mut FE,
 ) -> WasmResult<Reachability<()>> {
-    let (flags, offset, addr) = prepare_addr_prechk(memarg, builder, state, environ)?;
+    let (flags, addr) = prepare_addr_prechk(memarg, builder, state, environ)?;
 
     let (load, dfg) = builder
         .ins()
-        .Load(opcode, result_ty, flags, offset, addr);
+        .Load(opcode, result_ty, flags, Offset32::new(0), addr);
     state.push1(dfg.first_result(load));
     Ok(Reachability::Reachable(()))
 }
@@ -2722,11 +2744,11 @@ fn translate_store_prechk<FE: FuncEnvironment + ?Sized>(
     let val = state.pop1();
     let val_ty = builder.func.dfg.value_type(val);
 
-    let (flags, offset, addr) = prepare_addr_prechk(memarg, builder, state, environ)?;
+    let (flags, addr) = prepare_addr_prechk(memarg, builder, state, environ)?;
 
     builder
         .ins()
-        .Store(opcode, val_ty, flags, offset, val, addr);
+        .Store(opcode, val_ty, flags, Offset32::new(0), val, addr);
     Ok(())
 }
 

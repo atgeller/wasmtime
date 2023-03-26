@@ -332,7 +332,7 @@ where
     })
 }
 
-fn cast_index_to_pointer_ty(
+pub fn cast_index_to_pointer_ty(
     index: ir::Value,
     index_ty: ir::Type,
     pointer_ty: ir::Type,
