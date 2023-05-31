@@ -79,16 +79,18 @@ impl Default for Tunables {
             // We've got lots of address space on 64-bit so use a larger
             // grow-into-this area, but on 32-bit we aren't as lucky.
             #[cfg(target_pointer_width = "64")]
-            dynamic_memory_growth_reserve: 2 << 30, // 2GB
+            dynamic_memory_growth_reserve: 0,
+            //dynamic_memory_growth_reserve: 2 << 30, // 2GB
             #[cfg(target_pointer_width = "32")]
-            dynamic_memory_growth_reserve: 1 << 20, // 1MB
+            //dynamic_memory_growth_reserve: 1 << 20, // 1MB
+            dynamic_memory_growth_reserve: 0,
 
             generate_native_debuginfo: false,
             parse_wasm_debuginfo: true,
             consume_fuel: false,
             epoch_interruption: false,
             static_memory_bound_is_maximum: false,
-            guard_before_linear_memory: true,
+            guard_before_linear_memory: false,
             generate_address_map: true,
             debug_adapter_modules: false,
         }
