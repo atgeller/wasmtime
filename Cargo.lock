@@ -4028,8 +4028,7 @@ dependencies = [
 [[package]]
 name = "wit-parser"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "703eb1d2f89ff2c52d50f7ff002735e423cea75f0a5dc5c8a4626c4c47cd9ca6"
+source = "git+https://github.com/atgeller/wasm-tools?tag=popl2023#ea9977dc437c0fd6d26aad62d8787618825e0f37"
 dependencies = [
  "anyhow",
  "id-arena",
@@ -4060,6 +4059,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "z3"
+version = "0.11.2"
+source = "git+https://github.com/Trolldemorted/z3.rs/?branch=buildfix3#03a57db99478069defc4b2b5f86030378eb10c1e"
+dependencies = [
+ "log",
+ "z3-sys",
+]
+
+[[package]]
+name = "z3-sys"
+version = "0.7.1"
+source = "git+https://github.com/Trolldemorted/z3.rs/?branch=buildfix3#03a57db99478069defc4b2b5f86030378eb10c1e"
+dependencies = [
+ "ureq",
+ "zip",
+]
+
+[[package]]
 name = "zeroize"
 version = "1.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4078,6 +4095,26 @@ dependencies = [
  "quote",
  "syn",
  "synstructure",
+]
+
+[[package]]
+name = "zip"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "537ce7411d25e54e8ae21a7ce0b15840e7bfcff15b51d697ec3266cc76bdf080"
+dependencies = [
+ "aes",
+ "byteorder",
+ "bzip2",
+ "constant_time_eq",
+ "crc32fast",
+ "crossbeam-utils",
+ "flate2",
+ "hmac 0.12.1",
+ "pbkdf2",
+ "sha1",
+ "time",
+ "zstd",
 ]
 
 [[package]]
