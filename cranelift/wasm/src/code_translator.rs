@@ -779,6 +779,90 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
                 translate_load(memarg, ir::Opcode::Load, F64, builder, state, environ)?
             );
         }
+        Operator::I32Load8UPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Uload8, I32, builder, state, environ)?
+            );
+        }
+        Operator::I32Load16UPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Uload16, I32, builder, state, environ)?
+            );
+        }
+        Operator::I32Load8SPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Sload8, I32, builder, state, environ)?
+            );
+        }
+        Operator::I32Load16SPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Sload16, I32, builder, state, environ)?
+            );
+        }
+        Operator::I64Load8UPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Uload8, I64, builder, state, environ)?
+            );
+        }
+        Operator::I64Load16UPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Uload16, I64, builder, state, environ)?
+            );
+        }
+        Operator::I64Load8SPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Sload8, I64, builder, state, environ)?
+            );
+        }
+        Operator::I64Load16SPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Sload16, I64, builder, state, environ)?
+            );
+        }
+        Operator::I64Load32SPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Sload32, I64, builder, state, environ)?
+            );
+        }
+        Operator::I64Load32UPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Uload32, I64, builder, state, environ)?
+            );
+        }
+        Operator::I32LoadPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Load, I32, builder, state, environ)?
+            );
+        }
+        Operator::I64LoadPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Load, I64, builder, state, environ)?
+            );
+        }
+        Operator::F32LoadPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Load, F32, builder, state, environ)?
+            );
+        }
+        Operator::F64LoadPrechk { memarg } => {
+            unwrap_or_return_unreachable_state!(
+                state,
+                translate_load_prechk(memarg, ir::Opcode::Load, F64, builder, state, environ)?
+            );
+        }
         Operator::V128Load { memarg } => {
             unwrap_or_return_unreachable_state!(
                 state,
@@ -854,6 +938,21 @@ pub fn translate_operator<FE: FuncEnvironment + ?Sized>(
         }
         Operator::V128Store { memarg } => {
             translate_store(memarg, ir::Opcode::Store, builder, state, environ)?;
+        }
+        Operator::I32StorePrechk { memarg }
+        | Operator::I64StorePrechk { memarg }
+        | Operator::F32StorePrechk { memarg }
+        | Operator::F64StorePrechk { memarg } => {
+            translate_store_prechk(memarg, ir::Opcode::Store, builder, state, environ)?;
+        }
+        Operator::I32Store8Prechk { memarg } | Operator::I64Store8Prechk { memarg } => {
+            translate_store_prechk(memarg, ir::Opcode::Istore8, builder, state, environ)?;
+        }
+        Operator::I32Store16Prechk { memarg } | Operator::I64Store16Prechk { memarg } => {
+            translate_store_prechk(memarg, ir::Opcode::Istore16, builder, state, environ)?;
+        }
+        Operator::I64Store32Prechk { memarg } => {
+            translate_store_prechk(memarg, ir::Opcode::Istore32, builder, state, environ)?;
         }
         /****************************** Nullary Operators ************************************/
         Operator::I32Const { value } => state.push1(builder.ins().iconst(I32, i64::from(*value))),
@@ -2720,6 +2819,56 @@ where
     Ok(Reachability::Reachable((flags, addr)))
 }
 
+/// Factors out common functionality for prechked memory accesses
+fn prepare_addr_prechk<FE>(
+    memarg: &MemArg,
+    builder: &mut FunctionBuilder,
+    state: &mut FuncTranslationState,
+    environ: &mut FE,
+) -> WasmResult<(MemFlags, Value)>
+where
+    FE: FuncEnvironment + ?Sized,
+{
+    let mut index = state.pop1();
+    let heap = state.get_heap(builder.func, memarg.memory, environ)?;
+    let heap = environ.heaps()[heap].clone();
+    let base = builder.ins().global_value(environ.pointer_type(), heap.base);
+
+    // If the offset doesn't fit in a u32, fold it into the index
+    let offset = match u32::try_from(memarg.offset) {
+        Ok(val) => val as i64,
+        Err(_) => {
+            let offset_comp = builder.ins().iconst(heap.index_type, memarg.offset as i64);
+            index =
+                builder
+                    .ins()
+                    .uadd_sat(index, offset_comp);
+            0
+        }
+    };
+
+    let index = bounds_checks::cast_index_to_pointer_ty(
+        index,
+        heap.index_type,
+        environ.pointer_type(),
+        &mut builder.cursor(),
+    );
+
+    let final_base = builder.ins().iadd(base, index);
+    let addr = if offset == 0 {
+        final_base
+    } else {
+        builder.ins().iadd_imm(final_base, offset)
+    };
+
+    let mut flags = MemFlags::new();
+    flags.set_endianness(ir::Endianness::Little);
+    flags.set_heap();
+    flags.notrap();
+
+    Ok((flags, addr))
+}
+
 fn align_atomic_addr(
     memarg: &MemArg,
     loaded_bytes: u8,
@@ -2813,6 +2962,27 @@ fn translate_load<FE: FuncEnvironment + ?Sized>(
     Ok(Reachability::Reachable(()))
 }
 
+/// Translate a load instruction.
+/// 
+/// Since we've prechked the load instruction,
+/// we can do the bare minimum functionality here
+fn translate_load_prechk<FE: FuncEnvironment + ?Sized>(
+    memarg: &MemArg,
+    opcode: ir::Opcode,
+    result_ty: Type,
+    builder: &mut FunctionBuilder,
+    state: &mut FuncTranslationState,
+    environ: &mut FE,
+) -> WasmResult<Reachability<()>> {
+    let (flags, addr) = prepare_addr_prechk(memarg, builder, state, environ)?;
+
+    let (load, dfg) = builder
+        .ins()
+        .Load(opcode, result_ty, flags, Offset32::new(0), addr);
+    state.push1(dfg.first_result(load));
+    Ok(Reachability::Reachable(()))
+}
+
 /// Translate a store instruction.
 fn translate_store<FE: FuncEnvironment + ?Sized>(
     memarg: &MemArg,
@@ -2831,6 +3001,28 @@ fn translate_store<FE: FuncEnvironment + ?Sized>(
     builder
         .ins()
         .Store(opcode, val_ty, flags, Offset32::new(0), val, base);
+    Ok(())
+}
+
+/// Translate a store instruction.
+///
+/// Since we've prechked the store instruction,
+/// we can do the bare minimum functionality here
+fn translate_store_prechk<FE: FuncEnvironment + ?Sized>(
+    memarg: &MemArg,
+    opcode: ir::Opcode,
+    builder: &mut FunctionBuilder,
+    state: &mut FuncTranslationState,
+    environ: &mut FE,
+) -> WasmResult<()> {
+    let val = state.pop1();
+    let val_ty = builder.func.dfg.value_type(val);
+
+    let (flags, addr) = prepare_addr_prechk(memarg, builder, state, environ)?;
+
+    builder
+        .ins()
+        .Store(opcode, val_ty, flags, Offset32::new(0), val, addr);
     Ok(())
 }
 

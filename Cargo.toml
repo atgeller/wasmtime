@@ -199,11 +199,11 @@ rustix = "0.37.13"
 wit-bindgen = { version = "0.7.0", default-features = false }
 
 # wasm-tools family:
-wasmparser = "0.107.0"
-wat = "1.0.66"
-wast = "60.0.0"
+wasmparser = { git = "https://github.com/atgeller/wasm-tools", branch = "prove-z3" }
+wat = { git = "https://github.com/atgeller/wasm-tools", branch = "prove-z3" }
+wast = { git = "https://github.com/atgeller/wasm-tools", branch = "prove-z3" }
 wasmprinter = "0.2.59"
-wasm-encoder = "0.29.0"
+wasm-encoder = { git = "https://github.com/atgeller/wasm-tools", branch = "prove-z3" }
 wasm-smith = "0.12.10"
 wasm-mutate = "0.2.27"
 wit-parser = "0.8.0"

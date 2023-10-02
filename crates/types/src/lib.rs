@@ -402,7 +402,7 @@ pub trait TypeConvert {
     }
 
     /// Converts a wasmparser function type to a wasmtime type
-    fn convert_func_type(&self, ty: &wasmparser::FuncType) -> WasmFuncType {
+    fn convert_func_type(&self, ty: &wasmparser::IndexedFuncType) -> WasmFuncType {
         let params = ty
             .params()
             .iter()
