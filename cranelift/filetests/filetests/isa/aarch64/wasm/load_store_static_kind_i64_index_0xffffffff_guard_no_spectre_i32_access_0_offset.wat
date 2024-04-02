@@ -41,7 +41,7 @@
 ;; block0:
 ;;   orr x5, xzr, #268435452
 ;;   subs xzr, x0, x5
-;;   b.ls label1 ; b label3
+;;   b.hi label3 ; b label1
 ;; block1:
 ;;   ldr x7, [x2]
 ;;   str w1, [x7, x0]
@@ -55,7 +55,7 @@
 ;; block0:
 ;;   orr x5, xzr, #268435452
 ;;   subs xzr, x0, x5
-;;   b.ls label1 ; b label3
+;;   b.hi label3 ; b label1
 ;; block1:
 ;;   ldr x7, [x1]
 ;;   ldr w0, [x7, x0]

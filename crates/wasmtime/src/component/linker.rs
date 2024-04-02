@@ -1,16 +1,20 @@
 use crate::component::func::HostFunc;
 use crate::component::instance::RuntimeImport;
 use crate::component::matching::TypeChecker;
-use crate::component::{Component, ComponentNamedList, Instance, InstancePre, Lift, Lower, Val};
+use crate::component::{
+    Component, ComponentNamedList, Instance, InstancePre, Lift, Lower, ResourceType, Val,
+};
 use crate::{AsContextMut, Engine, Module, StoreContextMut};
 use anyhow::{anyhow, bail, Context, Result};
+use indexmap::IndexMap;
 use std::collections::hash_map::{Entry, HashMap};
 use std::future::Future;
 use std::marker;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use wasmtime_environ::component::TypeDef;
-use wasmtime_environ::PrimaryMap;
+use wasmtime_environ::{EntityRef, PrimaryMap};
 
 /// A type used to instantiate [`Component`]s.
 ///
@@ -22,11 +26,27 @@ pub struct Linker<T> {
     engine: Engine,
     strings: Strings,
     map: NameMap,
+    path: Vec<usize>,
+    resource_imports: usize,
     allow_shadowing: bool,
     _marker: marker::PhantomData<fn() -> T>,
 }
 
-#[derive(Default)]
+impl<T> Clone for Linker<T> {
+    fn clone(&self) -> Linker<T> {
+        Linker {
+            engine: self.engine.clone(),
+            strings: self.strings.clone(),
+            map: self.map.clone(),
+            path: self.path.clone(),
+            resource_imports: self.resource_imports.clone(),
+            allow_shadowing: self.allow_shadowing,
+            _marker: self._marker,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct Strings {
     string2idx: HashMap<Arc<str>, usize>,
     strings: Vec<Arc<str>>,
@@ -38,20 +58,67 @@ pub struct Strings {
 /// a "bag of named items", so each [`LinkerInstance`] can further define items
 /// internally.
 pub struct LinkerInstance<'a, T> {
-    engine: Engine,
+    engine: &'a Engine,
+    path: &'a mut Vec<usize>,
+    path_len: usize,
     strings: &'a mut Strings,
     map: &'a mut NameMap,
+    resource_imports: &'a mut usize,
     allow_shadowing: bool,
     _marker: marker::PhantomData<fn() -> T>,
 }
 
-pub type NameMap = HashMap<usize, Definition>;
+/// Index correlating a resource definition to the import path.
+/// This is assigned by [`Linker::resource`] and may be used to associate it to
+/// [`RuntimeImportIndex`](wasmtime_environ::component::RuntimeImportIndex)
+/// at a later stage
+///
+/// [`Linker::resource`]: crate::component::LinkerInstance::resource
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ResourceImportIndex(usize);
+
+impl EntityRef for ResourceImportIndex {
+    fn new(idx: usize) -> Self {
+        Self(idx)
+    }
+
+    fn index(self) -> usize {
+        self.0
+    }
+}
+
+impl Deref for ResourceImportIndex {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<usize> for ResourceImportIndex {
+    fn from(idx: usize) -> Self {
+        Self(idx)
+    }
+}
+
+impl From<ResourceImportIndex> for usize {
+    fn from(idx: ResourceImportIndex) -> Self {
+        idx.0
+    }
+}
+
+pub(crate) type NameMap = HashMap<usize, Definition>;
 
 #[derive(Clone)]
-pub enum Definition {
+pub(crate) enum Definition {
     Instance(NameMap),
     Func(Arc<HostFunc>),
     Module(Module),
+    Resource(
+        ResourceImportIndex,
+        ResourceType,
+        Arc<crate::func::HostFunc>,
+    ),
 }
 
 impl<T> Linker<T> {
@@ -63,6 +130,8 @@ impl<T> Linker<T> {
             strings: Strings::default(),
             map: NameMap::default(),
             allow_shadowing: false,
+            path: Vec::new(),
+            resource_imports: 0,
             _marker: marker::PhantomData,
         }
     }
@@ -85,9 +154,12 @@ impl<T> Linker<T> {
     /// the root namespace.
     pub fn root(&mut self) -> LinkerInstance<'_, T> {
         LinkerInstance {
-            engine: self.engine.clone(),
+            engine: &self.engine,
+            path: &mut self.path,
+            path_len: 0,
             strings: &mut self.strings,
             map: &mut self.map,
+            resource_imports: &mut self.resource_imports,
             allow_shadowing: self.allow_shadowing,
             _marker: self._marker,
         }
@@ -121,9 +193,11 @@ impl<T> Linker<T> {
     /// `component` imports or if a name defined doesn't match the type of the
     /// item imported by the `component` provided.
     pub fn instantiate_pre(&self, component: &Component) -> Result<InstancePre<T>> {
-        let cx = TypeChecker {
+        let mut cx = TypeChecker {
+            component: component.env_component(),
             types: component.types(),
             strings: &self.strings,
+            imported_resources: Default::default(),
         };
 
         // Walk over the component's list of import names and use that to lookup
@@ -134,8 +208,7 @@ impl<T> Linker<T> {
             let import = self
                 .strings
                 .lookup(name)
-                .and_then(|name| self.map.get(&name))
-                .ok_or_else(|| anyhow!("import `{name}` not defined"))?;
+                .and_then(|name| self.map.get(&name));
             cx.definition(ty, import)
                 .with_context(|| format!("import `{name}` has the wrong type"))?;
         }
@@ -145,6 +218,7 @@ impl<T> Linker<T> {
         // using the import map within the component created at
         // component-compile-time.
         let mut imports = PrimaryMap::with_capacity(env_component.imports.len());
+        let mut resource_imports = PrimaryMap::from(vec![None; self.resource_imports]);
         for (idx, (import, names)) in env_component.imports.iter() {
             let (root, _) = &env_component.import_types[*import];
             let root = self.strings.lookup(root).unwrap();
@@ -163,6 +237,14 @@ impl<T> Linker<T> {
             let import = match cur {
                 Definition::Module(m) => RuntimeImport::Module(m.clone()),
                 Definition::Func(f) => RuntimeImport::Func(f.clone()),
+                Definition::Resource(res_idx, t, dtor) => {
+                    resource_imports[*res_idx] = Some(idx);
+                    RuntimeImport::Resource {
+                        ty: t.clone(),
+                        _dtor: dtor.clone(),
+                        dtor_funcref: component.resource_drop_func_ref(dtor),
+                    }
+                }
 
                 // This is guaranteed by the compilation process that "leaf"
                 // runtime imports are never instances.
@@ -171,7 +253,7 @@ impl<T> Linker<T> {
             let i = imports.push(import);
             assert_eq!(i, idx);
         }
-        Ok(unsafe { InstancePre::new_unchecked(component.clone(), imports) })
+        Ok(unsafe { InstancePre::new_unchecked(component.clone(), imports, resource_imports) })
     }
 
     /// Instantiates the [`Component`] provided into the `store` specified.
@@ -231,9 +313,12 @@ impl<T> Linker<T> {
 impl<T> LinkerInstance<'_, T> {
     fn as_mut(&mut self) -> LinkerInstance<'_, T> {
         LinkerInstance {
-            engine: self.engine.clone(),
+            engine: self.engine,
+            path: self.path,
+            path_len: self.path_len,
             strings: self.strings,
             map: self.map,
+            resource_imports: self.resource_imports,
             allow_shadowing: self.allow_shadowing,
             _marker: self._marker,
         }
@@ -311,24 +396,69 @@ impl<T> LinkerInstance<'_, T> {
         name: &str,
         func: F,
     ) -> Result<()> {
-        for (import_name, ty) in component.env_component().import_types.values() {
-            if name == import_name {
-                if let TypeDef::ComponentFunc(index) = ty {
-                    let name = self.strings.intern(name);
-                    return self.insert(
-                        name,
-                        Definition::Func(HostFunc::new_dynamic(func, *index, component.types())),
-                    );
+        let mut map = &component
+            .env_component()
+            .import_types
+            .values()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect::<IndexMap<_, _>>();
+
+        for name in self.path.iter().copied().take(self.path_len) {
+            let name = self.strings.strings[name].deref();
+            if let Some(ty) = map.get(name) {
+                if let TypeDef::ComponentInstance(index) = ty {
+                    map = &component.types()[*index].exports;
                 } else {
-                    bail!("import `{name}` has the wrong type (expected a function)");
+                    bail!("import `{name}` has the wrong type (expected a component instance)");
                 }
+            } else {
+                bail!("import `{name}` not found");
             }
         }
 
-        Err(anyhow!("import `{name}` not found"))
+        if let Some(ty) = map.get(name) {
+            if let TypeDef::ComponentFunc(index) = ty {
+                let name = self.strings.intern(name);
+                return self.insert(
+                    name,
+                    Definition::Func(HostFunc::new_dynamic(func, *index, component.types())),
+                );
+            } else {
+                bail!("import `{name}` has the wrong type (expected a function)");
+            }
+        } else {
+            Err(anyhow!("import `{name}` not found"))
+        }
     }
 
-    // TODO: define func_new_async
+    /// Define a new host-provided async function using dynamic types.
+    ///
+    /// This is exactly like [`Self::func_new`] except it takes an async
+    /// host function.
+    #[cfg(feature = "async")]
+    #[cfg_attr(nightlydoc, doc(cfg(feature = "async")))]
+    pub fn func_new_async<F>(&mut self, component: &Component, name: &str, f: F) -> Result<()>
+    where
+        F: for<'a> Fn(
+                StoreContextMut<'a, T>,
+                &'a [Val],
+                &'a mut [Val],
+            ) -> Box<dyn Future<Output = Result<()>> + Send + 'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        assert!(
+            self.engine.config().async_support,
+            "cannot use `func_new_async` without enabling async support in the config"
+        );
+        let ff = move |mut store: StoreContextMut<'_, T>, params: &[Val], results: &mut [Val]| {
+            let async_cx = store.as_context_mut().0.async_cx().expect("async cx");
+            let mut future = Pin::from(f(store.as_context_mut(), params, results));
+            unsafe { async_cx.block_on(future.as_mut()) }?
+        };
+        self.func_new(component, name, ff)
+    }
 
     /// Defines a [`Module`] within this instance.
     ///
@@ -338,6 +468,48 @@ impl<T> LinkerInstance<'_, T> {
     pub fn module(&mut self, name: &str, module: &Module) -> Result<()> {
         let name = self.strings.intern(name);
         self.insert(name, Definition::Module(module.clone()))
+    }
+
+    /// Defines a new resource of a given [`ResourceType`] in this linker.
+    ///
+    /// This function is used to specify resources defined in the host.
+    ///
+    /// The `name` argument is the name to define the resource within this
+    /// linker.
+    ///
+    /// The `dtor` provided is a destructor that will get invoked when an owned
+    /// version of this resource is destroyed from the guest. Note that this
+    /// destructor is not called when a host-owned resource is destroyed as it's
+    /// assumed the host knows how to handle destroying its own resources.
+    ///
+    /// The `dtor` closure is provided the store state as the first argument
+    /// along with the representation of the resource that was just destroyed.
+    ///
+    /// [`Resource<U>`]: crate::component::Resource
+    ///
+    /// # Errors
+    ///
+    /// The provided `dtor` closure returns an error if something goes wrong
+    /// when a guest calls the `dtor` to drop a `Resource<T>` such as
+    /// a runtime trap or a runtime limit being exceeded.
+    pub fn resource(
+        &mut self,
+        name: &str,
+        ty: ResourceType,
+        dtor: impl Fn(StoreContextMut<'_, T>, u32) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<ResourceImportIndex> {
+        let name = self.strings.intern(name);
+        let dtor = Arc::new(crate::func::HostFunc::wrap(
+            &self.engine,
+            move |mut cx: crate::Caller<'_, T>, param: u32| dtor(cx.as_context_mut(), param),
+        ));
+        let idx = ResourceImportIndex::new(*self.resource_imports);
+        *self.resource_imports = self
+            .resource_imports
+            .checked_add(1)
+            .context("resource import count would overflow")?;
+        self.insert(name, Definition::Resource(idx, ty, dtor))?;
+        Ok(idx)
     }
 
     /// Defines a nested instance within this instance.
@@ -368,6 +540,9 @@ impl<T> LinkerInstance<'_, T> {
             Definition::Instance(map) => map,
             _ => unreachable!(),
         };
+        self.path.truncate(self.path_len);
+        self.path.push(name);
+        self.path_len += 1;
         Ok(self)
     }
 

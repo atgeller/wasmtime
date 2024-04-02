@@ -1,33 +1,16 @@
 //! Runtime library support for Wasmtime.
 
-#![deny(missing_docs, trivial_numeric_casts, unused_extern_crates)]
-#![warn(unused_import_braces)]
-#![cfg_attr(feature = "clippy", plugin(clippy(conf_file = "../../clippy.toml")))]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    allow(clippy::new_without_default, clippy::new_without_default)
-)]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    warn(
-        clippy::float_arithmetic,
-        clippy::mut_mut,
-        clippy::nonminimal_bool,
-        clippy::map_unwrap_or,
-        clippy::clippy::print_stdout,
-        clippy::unicode_not_nfc,
-        clippy::use_self
-    )
-)]
+#![deny(missing_docs)]
+#![warn(clippy::cast_sign_loss)]
 
-use anyhow::Error;
+use anyhow::{Error, Result};
+use std::fmt;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use wasmtime_environ::{DefinedFuncIndex, DefinedMemoryIndex, HostPtr, VMOffsets};
 
-#[macro_use]
-mod trampolines;
-
+mod arch;
 #[cfg(feature = "component-model")]
 pub mod component;
 mod export;
@@ -38,44 +21,51 @@ mod memory;
 mod mmap;
 mod mmap_vec;
 mod parking_spot;
+mod send_sync_ptr;
+mod store_box;
+mod sys;
 mod table;
 mod traphandlers;
 mod vmcontext;
 
+#[cfg(feature = "debug-builtins")]
 pub mod debug_builtins;
 pub mod libcalls;
+pub mod mpk;
 
+#[cfg(feature = "debug-builtins")]
 pub use wasmtime_jit_debug::gdb_jit_int::GdbJitImageRegistration;
 
+pub use crate::arch::{get_stack_pointer, V128Abi};
 pub use crate::export::*;
 pub use crate::externref::*;
 pub use crate::imports::Imports;
 pub use crate::instance::{
-    allocate_single_memory_instance, InstanceAllocationRequest, InstanceAllocator, InstanceHandle,
-    OnDemandInstanceAllocator, StorePtr,
+    Instance, InstanceAllocationRequest, InstanceAllocator, InstanceAllocatorImpl, InstanceHandle,
+    MemoryAllocationIndex, OnDemandInstanceAllocator, StorePtr, TableAllocationIndex,
 };
 #[cfg(feature = "pooling-allocator")]
 pub use crate::instance::{
-    InstanceLimits, PoolingAllocationStrategy, PoolingInstanceAllocator,
-    PoolingInstanceAllocatorConfig,
+    InstanceLimits, PoolingInstanceAllocator, PoolingInstanceAllocatorConfig,
 };
 pub use crate::memory::{
     DefaultMemoryCreator, Memory, RuntimeLinearMemory, RuntimeMemoryCreator, SharedMemory,
 };
 pub use crate::mmap::Mmap;
 pub use crate::mmap_vec::MmapVec;
+pub use crate::mpk::MpkEnabled;
+pub use crate::store_box::*;
+pub use crate::sys::unwind::UnwindRegistration;
 pub use crate::table::{Table, TableElement};
-pub use crate::trampolines::prepare_host_to_wasm_trampoline;
-pub use crate::traphandlers::{
-    catch_traps, init_traps, raise_lib_trap, raise_user_trap, resume_panic, tls_eager_initialize,
-    Backtrace, SignalHandler, TlsRestore, Trap, TrapReason,
-};
+pub use crate::traphandlers::*;
 pub use crate::vmcontext::{
-    VMCallerCheckedAnyfunc, VMContext, VMFunctionBody, VMFunctionImport, VMGlobalDefinition,
-    VMGlobalImport, VMHostFuncContext, VMInvokeArgument, VMMemoryDefinition, VMMemoryImport,
-    VMOpaqueContext, VMRuntimeLimits, VMSharedSignatureIndex, VMTableDefinition, VMTableImport,
-    VMTrampoline, ValRaw,
+    VMArrayCallFunction, VMArrayCallHostFuncContext, VMContext, VMFuncRef, VMFunctionBody,
+    VMFunctionImport, VMGlobalDefinition, VMGlobalImport, VMInvokeArgument, VMMemoryDefinition,
+    VMMemoryImport, VMNativeCallFunction, VMNativeCallHostFuncContext, VMOpaqueContext,
+    VMRuntimeLimits, VMSharedSignatureIndex, VMTableDefinition, VMTableImport, VMWasmCallFunction,
+    ValRaw,
 };
+pub use send_sync_ptr::SendSyncPtr;
 
 mod module_id;
 pub use module_id::{CompiledModuleId, CompiledModuleIdAllocator};
@@ -130,7 +120,9 @@ pub unsafe trait Store {
     ) -> Result<bool, Error>;
     /// Callback invoked to notify the store's resource limiter that a memory
     /// grow operation has failed.
-    fn memory_grow_failed(&mut self, error: &Error);
+    ///
+    /// Note that this is not invoked if `memory_growing` returns an error.
+    fn memory_grow_failed(&mut self, error: Error) -> Result<()>;
     /// Callback invoked to allow the store's resource limiter to reject a
     /// table grow operation.
     fn table_growing(
@@ -141,7 +133,9 @@ pub unsafe trait Store {
     ) -> Result<bool, Error>;
     /// Callback invoked to notify the store's resource limiter that a table
     /// grow operation has failed.
-    fn table_grow_failed(&mut self, error: &Error);
+    ///
+    /// Note that this is not invoked if `table_growing` returns an error.
+    fn table_grow_failed(&mut self, error: Error) -> Result<()>;
     /// Callback invoked whenever fuel runs out by a wasm instance. If an error
     /// is returned that's raised as a trap. Otherwise wasm execution will
     /// continue as normal.
@@ -150,13 +144,17 @@ pub unsafe trait Store {
     /// number. Cannot fail; cooperative epoch-based yielding is
     /// completely semantically transparent. Returns the new deadline.
     fn new_epoch(&mut self) -> Result<u64, Error>;
+
+    /// Metadata required for resources for the component model.
+    #[cfg(feature = "component-model")]
+    fn component_calls(&mut self) -> &mut component::CallContexts;
 }
 
 /// Functionality required by this crate for a particular module. This
 /// is chiefly needed for lazy initialization of various bits of
 /// instance state.
 ///
-/// When an instance is created, it holds an Arc<dyn ModuleRuntimeInfo>
+/// When an instance is created, it holds an `Arc<dyn ModuleRuntimeInfo>`
 /// so that it can get to signatures, metadata on functions, memory and
 /// funcref-table images, etc. All of these things are ordinarily known
 /// by the higher-level layers of Wasmtime. Specifically, the main
@@ -170,7 +168,31 @@ pub trait ModuleRuntimeInfo: Send + Sync + 'static {
     fn module(&self) -> &Arc<wasmtime_environ::Module>;
 
     /// Returns the address, in memory, that the function `index` resides at.
-    fn function(&self, index: DefinedFuncIndex) -> *mut VMFunctionBody;
+    fn function(&self, index: DefinedFuncIndex) -> NonNull<VMWasmCallFunction>;
+
+    /// Returns the address, in memory, of the trampoline that allows the given
+    /// defined Wasm function to be called by the native calling convention.
+    ///
+    /// Returns `None` for Wasm functions which do not escape, and therefore are
+    /// not callable from outside the Wasm module itself.
+    fn native_to_wasm_trampoline(
+        &self,
+        index: DefinedFuncIndex,
+    ) -> Option<NonNull<VMNativeCallFunction>>;
+
+    /// Returns the address, in memory, of the trampoline that allows the given
+    /// defined Wasm function to be called by the array calling convention.
+    ///
+    /// Returns `None` for Wasm functions which do not escape, and therefore are
+    /// not callable from outside the Wasm module itself.
+    fn array_to_wasm_trampoline(&self, index: DefinedFuncIndex) -> Option<VMArrayCallFunction>;
+
+    /// Return the address, in memory, of the trampoline that allows Wasm to
+    /// call a native function of the given signature.
+    fn wasm_to_native_trampoline(
+        &self,
+        signature: VMSharedSignatureIndex,
+    ) -> Option<NonNull<VMWasmCallFunction>>;
 
     /// Returns the `MemoryImage` structure used for copy-on-write
     /// initialization of the memory, if it's applicable.
@@ -199,30 +221,13 @@ pub fn page_size() -> usize {
 
     return match PAGE_SIZE.load(Ordering::Relaxed) {
         0 => {
-            let size = get_page_size();
+            let size = sys::vm::get_page_size();
             assert!(size != 0);
             PAGE_SIZE.store(size, Ordering::Relaxed);
             size
         }
         n => n,
     };
-
-    #[cfg(windows)]
-    fn get_page_size() -> usize {
-        use std::mem::MaybeUninit;
-        use windows_sys::Win32::System::SystemInformation::*;
-
-        unsafe {
-            let mut info = MaybeUninit::uninit();
-            GetSystemInfo(info.as_mut_ptr());
-            info.assume_init_ref().dwPageSize as usize
-        }
-    }
-
-    #[cfg(unix)]
-    fn get_page_size() -> usize {
-        unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
-    }
 }
 
 /// Result of [`Memory::atomic_wait32`] and [`Memory::atomic_wait64`]
@@ -237,4 +242,23 @@ pub enum WaitResult {
     /// Indicates that `wait` completed with a timeout, meaning that the
     /// original value matched as expected but nothing ever called `notify`.
     TimedOut = 2,
+}
+
+/// Description about a fault that occurred in WebAssembly.
+#[derive(Debug)]
+pub struct WasmFault {
+    /// The size of memory, in bytes, at the time of the fault.
+    pub memory_size: usize,
+    /// The WebAssembly address at which the fault occurred.
+    pub wasm_address: u64,
+}
+
+impl fmt::Display for WasmFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "memory fault at wasm address 0x{:x} in linear memory of size 0x{:x}",
+            self.wasm_address, self.memory_size,
+        )
+    }
 }

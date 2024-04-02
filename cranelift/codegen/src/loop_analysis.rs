@@ -330,6 +330,7 @@ mod tests {
         let block1 = func.dfg.make_block();
         let block2 = func.dfg.make_block();
         let block3 = func.dfg.make_block();
+        let block4 = func.dfg.make_block();
         let cond = func.dfg.append_block_param(block0, types::I32);
 
         {
@@ -342,11 +343,13 @@ mod tests {
             cur.ins().jump(block2, &[]);
 
             cur.insert_block(block2);
-            cur.ins().brnz(cond, block1, &[]);
-            cur.ins().jump(block3, &[]);
+            cur.ins().brif(cond, block1, &[], block3, &[]);
 
             cur.insert_block(block3);
-            cur.ins().brnz(cond, block0, &[]);
+            cur.ins().brif(cond, block0, &[], block4, &[]);
+
+            cur.insert_block(block4);
+            cur.ins().return_(&[]);
         }
 
         let mut loop_analysis = LoopAnalysis::new();
@@ -385,53 +388,52 @@ mod tests {
         let block3 = func.dfg.make_block();
         let block4 = func.dfg.make_block();
         let block5 = func.dfg.make_block();
+        let block6 = func.dfg.make_block();
         let cond = func.dfg.append_block_param(block0, types::I32);
 
         {
             let mut cur = FuncCursor::new(&mut func);
 
             cur.insert_block(block0);
-            cur.ins().brnz(cond, block1, &[]);
-            cur.ins().jump(block3, &[]);
+            cur.ins().brif(cond, block1, &[], block3, &[]);
 
             cur.insert_block(block1);
             cur.ins().jump(block2, &[]);
 
             cur.insert_block(block2);
-            cur.ins().brnz(cond, block1, &[]);
-            cur.ins().jump(block5, &[]);
+            cur.ins().brif(cond, block1, &[], block5, &[]);
 
             cur.insert_block(block3);
             cur.ins().jump(block4, &[]);
 
             cur.insert_block(block4);
-            cur.ins().brnz(cond, block3, &[]);
-            cur.ins().jump(block5, &[]);
+            cur.ins().brif(cond, block3, &[], block5, &[]);
 
             cur.insert_block(block5);
-            cur.ins().brnz(cond, block0, &[]);
+            cur.ins().brif(cond, block0, &[], block6, &[]);
+
+            cur.insert_block(block6);
+            cur.ins().return_(&[]);
         }
 
         let mut loop_analysis = LoopAnalysis::new();
-        let mut cfg = ControlFlowGraph::new();
-        let mut domtree = DominatorTree::new();
-        cfg.compute(&func);
-        domtree.compute(&func, &cfg);
+        let cfg = ControlFlowGraph::with_function(&func);
+        let domtree = DominatorTree::with_function(&func, &cfg);
         loop_analysis.compute(&func, &cfg, &domtree);
 
         let loops = loop_analysis.loops().collect::<Vec<Loop>>();
         assert_eq!(loops.len(), 3);
         assert_eq!(loop_analysis.loop_header(loops[0]), block0);
-        assert_eq!(loop_analysis.loop_header(loops[1]), block1);
-        assert_eq!(loop_analysis.loop_header(loops[2]), block3);
+        assert_eq!(loop_analysis.loop_header(loops[1]), block3);
+        assert_eq!(loop_analysis.loop_header(loops[2]), block1);
         assert_eq!(loop_analysis.loop_parent(loops[1]), Some(loops[0]));
         assert_eq!(loop_analysis.loop_parent(loops[2]), Some(loops[0]));
         assert_eq!(loop_analysis.loop_parent(loops[0]), None);
         assert_eq!(loop_analysis.is_in_loop(block0, loops[0]), true);
-        assert_eq!(loop_analysis.is_in_loop(block1, loops[1]), true);
-        assert_eq!(loop_analysis.is_in_loop(block2, loops[1]), true);
-        assert_eq!(loop_analysis.is_in_loop(block3, loops[2]), true);
-        assert_eq!(loop_analysis.is_in_loop(block4, loops[2]), true);
+        assert_eq!(loop_analysis.is_in_loop(block1, loops[2]), true);
+        assert_eq!(loop_analysis.is_in_loop(block2, loops[2]), true);
+        assert_eq!(loop_analysis.is_in_loop(block3, loops[1]), true);
+        assert_eq!(loop_analysis.is_in_loop(block4, loops[1]), true);
         assert_eq!(loop_analysis.is_in_loop(block5, loops[0]), true);
         assert_eq!(loop_analysis.loop_level(block0).level(), 1);
         assert_eq!(loop_analysis.loop_level(block1).level(), 2);

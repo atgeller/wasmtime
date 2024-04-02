@@ -9,8 +9,7 @@ target x86_64 haswell
 
 function %select_ref(i32, r64, r64) -> r64 {
 block0(v0: i32, v1: r64, v2: r64):
-    brz v0, block1(v2)
-    jump block1(v1)
+    brif v0, block1(v1), block1(v2)
 
 block1(v3: r64):
     return v3
@@ -23,7 +22,7 @@ function %table_set(i32, r64, i64 vmctx) {
     table0 = dynamic gv1, element_size 1, bound gv2, index_type i32
 
 block0(v0: i32, v1: r64, v2: i64):
-    v3 = table_addr.i64 table0, v0, +0;
+    v3 = table_addr.i64 table0, v0+0;
     store.r64 notrap aligned v1, v3
     return
 }
@@ -35,7 +34,7 @@ function %table_get(i32, i64 vmctx) -> r64 {
     table0 = dynamic gv1, element_size 1, bound gv2, index_type i32
 
 block0(v0: i32, v1: i64):
-    v2 = table_addr.i64 table0, v0, +0;
+    v2 = table_addr.i64 table0, v0+0;
     v3 = load.r64 notrap aligned v2
     return v3
 }

@@ -1,4 +1,5 @@
-use regalloc2::{PReg, RegClass};
+use regalloc2::PReg;
+pub use regalloc2::RegClass;
 
 /// A newtype abstraction on top of a physical register.
 //
@@ -8,9 +9,14 @@ use regalloc2::{PReg, RegClass};
 // so that the rest of Winch should only need to operate
 // on top of the concept of `Reg`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Reg(PReg);
+pub struct Reg(PReg);
 
 impl Reg {
+    /// Create a register from its encoding and class.
+    pub fn from(class: RegClass, enc: usize) -> Self {
+        Self::new(PReg::new(enc, class))
+    }
+
     /// Create a new register from a physical register.
     pub const fn new(raw: PReg) -> Self {
         Reg(raw)
@@ -27,14 +33,36 @@ impl Reg {
         Self::new(PReg::new(enc, RegClass::Float))
     }
 
-    /// Get the class of the underlying register.
-    pub fn class(self) -> RegClass {
+    /// Get the encoding of the underlying register.
+    pub const fn hw_enc(self) -> usize {
+        self.0.hw_enc()
+    }
+
+    /// Get the physical register representation.
+    pub(super) fn inner(&self) -> PReg {
+        self.0
+    }
+
+    /// Get the register class.
+    pub fn class(&self) -> RegClass {
         self.0.class()
     }
 
-    /// Get the encoding of the underlying register.
-    pub fn hw_enc(self) -> u8 {
-        self.0.hw_enc() as u8
+    /// Returns true if the registers is a general purpose
+    /// integer register.
+    pub fn is_int(&self) -> bool {
+        self.class() == RegClass::Int
+    }
+
+    /// Returns true if the registers is a float register.
+    pub fn is_float(&self) -> bool {
+        self.class() == RegClass::Float
+    }
+}
+
+impl From<Reg> for cranelift_codegen::Reg {
+    fn from(reg: Reg) -> Self {
+        reg.inner().into()
     }
 }
 

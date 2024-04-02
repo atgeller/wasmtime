@@ -1,6 +1,6 @@
 [package]
 name = "cranelift-interpreter"
-version = "0.92.0"
+version = "0.104.0"
 authors = ["The Cranelift Project Developers"]
 description = "Interpret Cranelift IR"
 repository = "https://github.com/bytecodealliance/wasmtime"
@@ -9,6 +9,9 @@ categories = ["no-std"]
 license = "Apache-2.0 WITH LLVM-exception"
 readme = "README.md"
 edition.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 cranelift-codegen = { workspace = true }
@@ -23,6 +26,3 @@ libm = "0.2.4"
 [dev-dependencies]
 cranelift-frontend = { workspace = true }
 cranelift-reader = { workspace = true }
-
-[badges]
-maintenance = { status = "experimental" }

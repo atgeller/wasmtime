@@ -36,7 +36,7 @@ block0:
 }
 ; sameln: function %bvalues() fast {
 ; nextln: block0:
-; nextln:     v0 = iconst.i32 -1
+; nextln:     v0 = iconst.i32 0xffff_ffff
 ; nextln:     v1 = iconst.i8 0
 ; nextln:     v2 = sextend.i32 v1
 ; nextln:     v3 = bxor v0, v2
@@ -65,15 +65,13 @@ block0(v95: i32, v96: i32, v97: i8):
 ; nextln: }
 
 ; Lane indexes.
-function %lanes() {
-block0:
-    v0 = iconst.i32x4 2
+function %lanes(i32x4) {
+block0(v0: i32x4):
     v1 = extractlane v0, 3
     v2 = insertlane v0, v1, 1
 }
-; sameln: function %lanes() fast {
-; nextln: block0:
-; nextln:     v0 = iconst.i32x4 2
+; sameln: function %lanes(i32x4) fast {
+; nextln: block0(v0: i32x4):
 ; nextln:     v1 = extractlane v0, 3
 ; nextln:     v2 = insertlane v0, v1, 1
 ; nextln: }
@@ -86,7 +84,7 @@ block0(v90: i32, v91: i32):
     v2 = icmp_imm sge v90, -12
     v3 = irsub_imm v91, 45
     v4 = icmp eq v90, v91
-    brnz v4, block0(v91, v90)
+    brif v4, block0(v91, v90), block0(v91, v90)
 }
 ; sameln: function %icmp(i32, i32) fast {
 ; nextln: block0(v90: i32, v91: i32):
@@ -95,7 +93,7 @@ block0(v90: i32, v91: i32):
 ; nextln:     v2 = icmp_imm sge v90, -12
 ; nextln:     v3 = irsub_imm v91, 45
 ; nextln:     v4 = icmp eq v90, v91
-; nextln:     brnz v4, block0(v91, v90)
+; nextln:     brif v4, block0(v91, v90), block0(v91, v90)
 ; nextln: }
 
 ; Floating condition codes.

@@ -7,8 +7,13 @@ block0:
   trap user0
 }
 
+; VCode:
 ; block0:
 ;   udf##trap_code=user0
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   .byte 0x00, 0x00, 0x00, 0x00 ; trap: user0
 
 function %g(i64) {
 block0(v0: i64):
@@ -18,14 +23,23 @@ block0(v0: i64):
   return
 }
 
+; VCode:
 ; block0:
-;   li t2,42
-;   ne a1,a0,t2##ty=i64
-;   bne a1,zero,taken(label1),not_taken(label2)
+;   li a2,42
+;   beq a0,a2,taken(label2),not_taken(label1)
 ; block1:
 ;   ret
 ; block2:
 ;   udf##trap_code=user0
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi a2, zero, 0x2a
+;   beq a0, a2, 8
+; block1: ; offset 0x8
+;   ret
+; block2: ; offset 0xc
+;   .byte 0x00, 0x00, 0x00, 0x00 ; trap: user0
 
 function %h() {
 block0:
@@ -33,7 +47,13 @@ block0:
   return
 }
 
+; VCode:
 ; block0:
+;   ebreak
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
 ;   ebreak
 ;   ret
 

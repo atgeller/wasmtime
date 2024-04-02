@@ -42,7 +42,7 @@
 ;;   mov w6, w0
 ;;   orr x7, xzr, #268435455
 ;;   subs xzr, x6, x7
-;;   b.ls label1 ; b label3
+;;   b.hi label3 ; b label1
 ;; block1:
 ;;   ldr x8, [x2]
 ;;   strb w1, [x8, w0, UXTW]
@@ -57,7 +57,7 @@
 ;;   mov w6, w0
 ;;   orr x7, xzr, #268435455
 ;;   subs xzr, x6, x7
-;;   b.ls label1 ; b label3
+;;   b.hi label3 ; b label1
 ;; block1:
 ;;   ldr x8, [x1]
 ;;   ldrb w0, [x8, w0, UXTW]

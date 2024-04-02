@@ -13,11 +13,19 @@ block0:
     return v1
 }
 
+; VCode:
 ; block0:
-;   movz w0, #56780
-;   uxth w2, w0
-;   movz w4, #56780
-;   subs wzr, w2, w4, UXTH
+;   movz w2, #56780
+;   uxth w1, w2
+;   subs wzr, w1, w2, UXTH
+;   cset x0, ne
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   mov w2, #0xddcc
+;   uxth w1, w2
+;   cmp w1, w2, uxth
 ;   cset x0, ne
 ;   ret
 

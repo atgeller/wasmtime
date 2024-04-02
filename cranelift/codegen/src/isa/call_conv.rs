@@ -4,7 +4,7 @@ use core::str;
 use target_lexicon::{CallingConvention, Triple};
 
 #[cfg(feature = "enable-serde")]
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 
 /// Calling convention identifiers.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -14,6 +14,12 @@ pub enum CallConv {
     Fast,
     /// Smallest caller code size, not ABI-stable.
     Cold,
+    /// Supports tail calls, not ABI-stable.
+    //
+    // Currently, this is basically sys-v except that callees pop stack
+    // arguments, rather than callers. Expected to change even more in the
+    // future, however!
+    Tail,
     /// System V-style convention used on many platforms.
     SystemV,
     /// Windows "fastcall" convention, also used for x64 and ARM.
@@ -24,18 +30,9 @@ pub enum CallConv {
     Probestack,
     /// Wasmtime equivalent of SystemV, not ABI-stable.
     ///
-    /// Currently only differs in how multiple return values are handled,
-    /// returning the first return value in a register and everything else
-    /// through a return-pointer.
+    /// FIXME: remove this when Wasmtime uses the "tail" calling convention for
+    /// all wasm functions.
     WasmtimeSystemV,
-    /// Wasmtime equivalent of WindowsFastcall, not ABI-stable.
-    ///
-    /// Differs from fastcall in the same way as `WasmtimeSystemV`.
-    WasmtimeFastcall,
-    /// Wasmtime equivalent of AppleAarch64, not ABI-stable.
-    ///
-    /// Differs from apple-aarch64 in the same way as `WasmtimeSystemV`.
-    WasmtimeAppleAarch64,
 }
 
 impl CallConv {
@@ -64,10 +61,18 @@ impl CallConv {
         }
     }
 
+    /// Does this calling convention support tail calls?
+    pub fn supports_tail_calls(&self) -> bool {
+        match self {
+            CallConv::Tail => true,
+            _ => false,
+        }
+    }
+
     /// Is the calling convention extending the Windows Fastcall ABI?
     pub fn extends_windows_fastcall(self) -> bool {
         match self {
-            Self::WindowsFastcall | Self::WasmtimeFastcall => true,
+            Self::WindowsFastcall => true,
             _ => false,
         }
     }
@@ -75,15 +80,7 @@ impl CallConv {
     /// Is the calling convention extending the Apple aarch64 ABI?
     pub fn extends_apple_aarch64(self) -> bool {
         match self {
-            Self::AppleAarch64 | Self::WasmtimeAppleAarch64 => true,
-            _ => false,
-        }
-    }
-
-    /// Is the calling convention extending the Wasmtime ABI?
-    pub fn extends_wasmtime(self) -> bool {
-        match self {
-            Self::WasmtimeSystemV | Self::WasmtimeFastcall | Self::WasmtimeAppleAarch64 => true,
+            Self::AppleAarch64 => true,
             _ => false,
         }
     }
@@ -94,13 +91,12 @@ impl fmt::Display for CallConv {
         f.write_str(match *self {
             Self::Fast => "fast",
             Self::Cold => "cold",
+            Self::Tail => "tail",
             Self::SystemV => "system_v",
             Self::WindowsFastcall => "windows_fastcall",
             Self::AppleAarch64 => "apple_aarch64",
             Self::Probestack => "probestack",
             Self::WasmtimeSystemV => "wasmtime_system_v",
-            Self::WasmtimeFastcall => "wasmtime_fastcall",
-            Self::WasmtimeAppleAarch64 => "wasmtime_apple_aarch64",
         })
     }
 }
@@ -111,13 +107,12 @@ impl str::FromStr for CallConv {
         match s {
             "fast" => Ok(Self::Fast),
             "cold" => Ok(Self::Cold),
+            "tail" => Ok(Self::Tail),
             "system_v" => Ok(Self::SystemV),
             "windows_fastcall" => Ok(Self::WindowsFastcall),
             "apple_aarch64" => Ok(Self::AppleAarch64),
             "probestack" => Ok(Self::Probestack),
             "wasmtime_system_v" => Ok(Self::WasmtimeSystemV),
-            "wasmtime_fastcall" => Ok(Self::WasmtimeFastcall),
-            "wasmtime_apple_aarch64" => Ok(Self::WasmtimeAppleAarch64),
             _ => Err(()),
         }
     }

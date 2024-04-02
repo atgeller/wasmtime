@@ -28,7 +28,7 @@
 
 ## Installation
 
-The Wasmtime CLI can be installed on Linux and macOS with a small install
+The Wasmtime CLI can be installed on Linux and macOS (locally) with a small install
 script:
 
 ```sh
@@ -59,6 +59,11 @@ $ rustc hello.rs --target wasm32-wasi
 $ wasmtime hello.wasm
 Hello, world!
 ```
+
+(Note: make sure you installed Rust using the `rustup` method in the official
+instructions above, and do not have a copy of the Rust toolchain installed on
+your system in some other way as well (e.g. the system package manager). Otherwise, the `rustup target add...`
+command may not install the target for the correct copy of Rust.)
 
 ## Features
 
@@ -95,7 +100,7 @@ Hello, world!
   standards process all along the way too.
 
 [Wasmtime]: https://github.com/bytecodealliance/wasmtime
-[Cranelift]: https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/README.md
+[Cranelift]: https://cranelift.dev/
 [Google's OSS Fuzz]: https://google.github.io/oss-fuzz/
 [security policy]: https://bytecodealliance.org/security
 [RFC process]: https://github.com/bytecodealliance/rfcs
@@ -108,7 +113,9 @@ Hello, world!
 ## Language Support
 
 You can use Wasmtime from a variety of different languages through embeddings of
-the implementation:
+the implementation.
+
+Languages supported by the Bytecode Alliance:
 
 * **[Rust]** - the [`wasmtime` crate]
 * **[C]** - the [`wasm.h`, `wasi.h`, and `wasmtime.h` headers][c-headers], [CMake](crates/c-api/CMakeLists.txt) or [`wasmtime` Conan package]
@@ -117,6 +124,11 @@ the implementation:
 * **[.NET]** - the [`Wasmtime` NuGet package]
 * **[Go]** - the [`wasmtime-go` repository]
 * **[Ruby]** - the [`wasmtime` gem]
+
+Languages supported by the community:
+
+* **[Elixir]** - the [`wasmex` hex package]
+* **Perl** - the [`Wasm` Perl package's `Wasm::Wasmtime`]
 
 [Rust]: https://bytecodealliance.github.io/wasmtime/lang-rust.html
 [C]: https://bytecodealliance.github.io/wasmtime/examples-c-embed.html
@@ -133,6 +145,9 @@ the implementation:
 [`wasmtime-cpp` Conan package]: https://conan.io/center/wasmtime-cpp
 [Ruby]: https://bytecodealliance.github.io/wasmtime/lang-ruby.html
 [`wasmtime` gem]: https://rubygems.org/gems/wasmtime
+[Elixir]: https://docs.wasmtime.dev/lang-elixir.html
+[`wasmex` hex package]: https://hex.pm/packages/wasmex
+[`Wasm` Perl package's `Wasm::Wasmtime`]: https://metacpan.org/pod/Wasm::Wasmtime
 
 ## Documentation
 

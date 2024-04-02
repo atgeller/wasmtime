@@ -8,7 +8,7 @@
 
 use crate::error::{Location, ParseError};
 use crate::testcommand::TestOption;
-use cranelift_codegen::isa::TargetIsa;
+use cranelift_codegen::isa::{OwnedTargetIsa, TargetIsa};
 use cranelift_codegen::settings::{Configurable, Flags, SetError};
 
 /// The ISA specifications in a `.clif` file.
@@ -19,7 +19,7 @@ pub enum IsaSpec {
 
     /// The parsed file does contain `isa` commands.
     /// Each `isa` command is used to configure a `TargetIsa` trait object.
-    Some(Vec<Box<dyn TargetIsa>>),
+    Some(Vec<OwnedTargetIsa>),
 }
 
 impl IsaSpec {
@@ -87,6 +87,8 @@ macro_rules! option_err {
 }
 
 /// Parse an iterator of command line options and apply them to `config`.
+///
+/// Note that parsing terminates after the first error is encountered.
 pub fn parse_options<'a, I>(
     iter: I,
     config: &mut dyn Configurable,
@@ -95,37 +97,40 @@ pub fn parse_options<'a, I>(
 where
     I: Iterator<Item = &'a str>,
 {
-    for opt in iter.map(TestOption::new) {
-        match opt {
-            TestOption::Flag(name) => match config.enable(name) {
-                Ok(_) => {}
-                Err(SetError::BadName(name)) => {
-                    return Err(ParseOptionError::UnknownFlag { loc, name })
-                }
-                Err(_) => return option_err!(loc, "not a boolean flag: '{}'", opt),
-            },
-            TestOption::Value(name, value) => match config.set(name, value) {
-                Ok(_) => {}
-                Err(SetError::BadName(name)) => {
-                    return Err(ParseOptionError::UnknownValue {
-                        loc,
-                        name,
-                        value: value.to_string(),
-                    })
-                }
-                Err(SetError::BadType) => {
-                    return option_err!(loc, "invalid setting type: '{}'", opt)
-                }
-                Err(SetError::BadValue(expected)) => {
-                    return option_err!(
-                        loc,
-                        "invalid setting value for '{}', expected {}",
-                        opt,
-                        expected
-                    );
-                }
-            },
-        }
+    for opt in iter {
+        parse_option(opt, config, loc)?;
     }
     Ok(())
+}
+
+/// Parse an single command line options and apply it to `config`.
+pub fn parse_option(
+    opt: &str,
+    config: &mut dyn Configurable,
+    loc: Location,
+) -> Result<(), ParseOptionError> {
+    match TestOption::new(opt) {
+        TestOption::Flag(name) => match config.enable(name) {
+            Ok(_) => Ok(()),
+            Err(SetError::BadName(name)) => Err(ParseOptionError::UnknownFlag { loc, name }),
+            Err(_) => option_err!(loc, "not a boolean flag: '{}'", opt),
+        },
+        TestOption::Value(name, value) => match config.set(name, value) {
+            Ok(_) => Ok(()),
+            Err(SetError::BadName(name)) => Err(ParseOptionError::UnknownValue {
+                loc,
+                name,
+                value: value.to_string(),
+            }),
+            Err(SetError::BadType) => option_err!(loc, "invalid setting type: '{}'", opt),
+            Err(SetError::BadValue(expected)) => {
+                option_err!(
+                    loc,
+                    "invalid setting value for '{}', expected {}",
+                    opt,
+                    expected
+                )
+            }
+        },
+    }
 }

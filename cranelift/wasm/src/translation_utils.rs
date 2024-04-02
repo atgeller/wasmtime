@@ -1,12 +1,9 @@
 //! Helper functions and structures for the translation.
 use crate::environ::TargetEnvironment;
 use crate::WasmResult;
-use core::convert::TryInto;
 use core::u32;
 use cranelift_codegen::ir;
 use cranelift_frontend::FunctionBuilder;
-#[cfg(feature = "enable-serde")]
-use serde::{Deserialize, Serialize};
 use wasmparser::{FuncValidator, WasmFuncType, WasmModuleResources};
 
 /// Get the parameter and result types for the given Wasm blocktype.
@@ -21,30 +18,14 @@ where
     T: WasmModuleResources,
 {
     return Ok(match ty {
-        wasmparser::BlockType::Empty => {
-            let params: &'static [wasmparser::ValType] = &[];
-            let results: &'static [wasmparser::ValType] = &[];
-            (
-                itertools::Either::Left(params.iter().copied()),
-                itertools::Either::Left(results.iter().copied()),
-            )
-        }
-        wasmparser::BlockType::Type(ty) => {
-            let params: &'static [wasmparser::ValType] = &[];
-            let results: &'static [wasmparser::ValType] = match ty {
-                wasmparser::ValType::I32 => &[wasmparser::ValType::I32],
-                wasmparser::ValType::I64 => &[wasmparser::ValType::I64],
-                wasmparser::ValType::F32 => &[wasmparser::ValType::F32],
-                wasmparser::ValType::F64 => &[wasmparser::ValType::F64],
-                wasmparser::ValType::V128 => &[wasmparser::ValType::V128],
-                wasmparser::ValType::ExternRef => &[wasmparser::ValType::ExternRef],
-                wasmparser::ValType::FuncRef => &[wasmparser::ValType::FuncRef],
-            };
-            (
-                itertools::Either::Left(params.iter().copied()),
-                itertools::Either::Left(results.iter().copied()),
-            )
-        }
+        wasmparser::BlockType::Empty => (
+            itertools::Either::Left(std::iter::empty()),
+            itertools::Either::Left(None.into_iter()),
+        ),
+        wasmparser::BlockType::Type(ty) => (
+            itertools::Either::Left(std::iter::empty()),
+            itertools::Either::Left(Some(ty).into_iter()),
+        ),
         wasmparser::BlockType::FuncType(ty_index) => {
             let ty = validator
                 .resources()
@@ -79,8 +60,9 @@ pub fn block_with_params<PE: TargetEnvironment + ?Sized>(
             wasmparser::ValType::F64 => {
                 builder.append_block_param(block, ir::types::F64);
             }
-            wasmparser::ValType::ExternRef | wasmparser::ValType::FuncRef => {
-                builder.append_block_param(block, environ.reference_type(ty.try_into()?));
+            wasmparser::ValType::Ref(rt) => {
+                let hty = environ.convert_heap_type(rt.heap_type());
+                builder.append_block_param(block, environ.reference_type(hty));
             }
             wasmparser::ValType::V128 => {
                 builder.append_block_param(block, ir::types::I8X16);

@@ -1,3 +1,5 @@
+#![cfg(not(miri))]
+
 use super::{TypedFuncExt, REALLOC_AND_FREE};
 use anyhow::Result;
 use std::rc::Rc;
@@ -31,10 +33,10 @@ fn thunks() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     instance
-        .get_typed_func::<(), (), _>(&mut store, "thunk")?
+        .get_typed_func::<(), ()>(&mut store, "thunk")?
         .call_and_post_return(&mut store, ())?;
     let err = instance
-        .get_typed_func::<(), (), _>(&mut store, "thunk-trap")?
+        .get_typed_func::<(), ()>(&mut store, "thunk-trap")?
         .call(&mut store, ())
         .unwrap_err();
     assert_eq!(err.downcast::<Trap>()?, Trap::UnreachableCodeReached);
@@ -58,9 +60,6 @@ fn typecheck() -> Result<()> {
             )
             (core instance $i (instantiate (module $m)))
             (func (export "thunk")
-                (canon lift (core func $i "thunk"))
-            )
-            (func (export "tuple-thunk") (param "a" (tuple)) (result (tuple))
                 (canon lift (core func $i "thunk"))
             )
             (func (export "take-string") (param "a" string)
@@ -89,41 +88,33 @@ fn typecheck() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let thunk = instance.get_func(&mut store, "thunk").unwrap();
-    let tuple_thunk = instance.get_func(&mut store, "tuple-thunk").unwrap();
     let take_string = instance.get_func(&mut store, "take-string").unwrap();
     let take_two_args = instance.get_func(&mut store, "take-two-args").unwrap();
     let ret_tuple = instance.get_func(&mut store, "ret-tuple").unwrap();
     let ret_tuple1 = instance.get_func(&mut store, "ret-tuple1").unwrap();
     let ret_string = instance.get_func(&mut store, "ret-string").unwrap();
     let ret_list_u8 = instance.get_func(&mut store, "ret-list-u8").unwrap();
-    assert!(thunk.typed::<(), (u32,), _>(&store).is_err());
-    assert!(thunk.typed::<(u32,), (), _>(&store).is_err());
-    assert!(thunk.typed::<(), (), _>(&store).is_ok());
-    assert!(tuple_thunk.typed::<(), (), _>(&store).is_err());
-    assert!(tuple_thunk.typed::<((),), (), _>(&store).is_err());
-    assert!(tuple_thunk.typed::<((),), ((),), _>(&store).is_ok());
-    assert!(take_string.typed::<(), (), _>(&store).is_err());
-    assert!(take_string.typed::<(String,), (), _>(&store).is_ok());
-    assert!(take_string.typed::<(&str,), (), _>(&store).is_ok());
-    assert!(take_string.typed::<(&[u8],), (), _>(&store).is_err());
-    assert!(take_two_args.typed::<(), (), _>(&store).is_err());
-    assert!(take_two_args
-        .typed::<(i32, &[u8]), (u32,), _>(&store)
-        .is_err());
-    assert!(take_two_args.typed::<(u32, &[u8]), (), _>(&store).is_err());
-    assert!(take_two_args.typed::<(i32, &[u8]), (), _>(&store).is_ok());
-    assert!(ret_tuple.typed::<(), (), _>(&store).is_err());
-    assert!(ret_tuple.typed::<(), (u8,), _>(&store).is_err());
-    assert!(ret_tuple.typed::<(), (u8, i8), _>(&store).is_ok());
-    assert!(ret_tuple1.typed::<(), ((u32,),), _>(&store).is_ok());
-    assert!(ret_tuple1.typed::<(), (u32,), _>(&store).is_err());
-    assert!(ret_string.typed::<(), (), _>(&store).is_err());
-    assert!(ret_string.typed::<(), (WasmStr,), _>(&store).is_ok());
-    assert!(ret_list_u8
-        .typed::<(), (WasmList<u16>,), _>(&store)
-        .is_err());
-    assert!(ret_list_u8.typed::<(), (WasmList<i8>,), _>(&store).is_err());
-    assert!(ret_list_u8.typed::<(), (WasmList<u8>,), _>(&store).is_ok());
+    assert!(thunk.typed::<(), (u32,)>(&store).is_err());
+    assert!(thunk.typed::<(u32,), ()>(&store).is_err());
+    assert!(thunk.typed::<(), ()>(&store).is_ok());
+    assert!(take_string.typed::<(), ()>(&store).is_err());
+    assert!(take_string.typed::<(String,), ()>(&store).is_ok());
+    assert!(take_string.typed::<(&str,), ()>(&store).is_ok());
+    assert!(take_string.typed::<(&[u8],), ()>(&store).is_err());
+    assert!(take_two_args.typed::<(), ()>(&store).is_err());
+    assert!(take_two_args.typed::<(i32, &[u8]), (u32,)>(&store).is_err());
+    assert!(take_two_args.typed::<(u32, &[u8]), ()>(&store).is_err());
+    assert!(take_two_args.typed::<(i32, &[u8]), ()>(&store).is_ok());
+    assert!(ret_tuple.typed::<(), ()>(&store).is_err());
+    assert!(ret_tuple.typed::<(), (u8,)>(&store).is_err());
+    assert!(ret_tuple.typed::<(), (u8, i8)>(&store).is_ok());
+    assert!(ret_tuple1.typed::<(), ((u32,),)>(&store).is_ok());
+    assert!(ret_tuple1.typed::<(), (u32,)>(&store).is_err());
+    assert!(ret_string.typed::<(), ()>(&store).is_err());
+    assert!(ret_string.typed::<(), (WasmStr,)>(&store).is_ok());
+    assert!(ret_list_u8.typed::<(), (WasmList<u16>,)>(&store).is_err());
+    assert!(ret_list_u8.typed::<(), (WasmList<i8>,)>(&store).is_err());
+    assert!(ret_list_u8.typed::<(), (WasmList<u8>,)>(&store).is_ok());
 
     Ok(())
 }
@@ -198,68 +189,68 @@ fn integers() -> Result<()> {
 
     // Passing in 100 is valid for all primitives
     instance
-        .get_typed_func::<(u8,), (), _>(&mut store, "take-u8")?
+        .get_typed_func::<(u8,), ()>(&mut store, "take-u8")?
         .call_and_post_return(&mut store, (100,))?;
     instance
-        .get_typed_func::<(i8,), (), _>(&mut store, "take-s8")?
+        .get_typed_func::<(i8,), ()>(&mut store, "take-s8")?
         .call_and_post_return(&mut store, (100,))?;
     instance
-        .get_typed_func::<(u16,), (), _>(&mut store, "take-u16")?
+        .get_typed_func::<(u16,), ()>(&mut store, "take-u16")?
         .call_and_post_return(&mut store, (100,))?;
     instance
-        .get_typed_func::<(i16,), (), _>(&mut store, "take-s16")?
+        .get_typed_func::<(i16,), ()>(&mut store, "take-s16")?
         .call_and_post_return(&mut store, (100,))?;
     instance
-        .get_typed_func::<(u32,), (), _>(&mut store, "take-u32")?
+        .get_typed_func::<(u32,), ()>(&mut store, "take-u32")?
         .call_and_post_return(&mut store, (100,))?;
     instance
-        .get_typed_func::<(i32,), (), _>(&mut store, "take-s32")?
+        .get_typed_func::<(i32,), ()>(&mut store, "take-s32")?
         .call_and_post_return(&mut store, (100,))?;
     instance
-        .get_typed_func::<(u64,), (), _>(&mut store, "take-u64")?
+        .get_typed_func::<(u64,), ()>(&mut store, "take-u64")?
         .call_and_post_return(&mut store, (100,))?;
     instance
-        .get_typed_func::<(i64,), (), _>(&mut store, "take-s64")?
+        .get_typed_func::<(i64,), ()>(&mut store, "take-s64")?
         .call_and_post_return(&mut store, (100,))?;
 
     // This specific wasm instance traps if any value other than 100 is passed
     new_instance(&mut store)?
-        .get_typed_func::<(u8,), (), _>(&mut store, "take-u8")?
+        .get_typed_func::<(u8,), ()>(&mut store, "take-u8")?
         .call(&mut store, (101,))
         .unwrap_err()
         .downcast::<Trap>()?;
     new_instance(&mut store)?
-        .get_typed_func::<(i8,), (), _>(&mut store, "take-s8")?
+        .get_typed_func::<(i8,), ()>(&mut store, "take-s8")?
         .call(&mut store, (101,))
         .unwrap_err()
         .downcast::<Trap>()?;
     new_instance(&mut store)?
-        .get_typed_func::<(u16,), (), _>(&mut store, "take-u16")?
+        .get_typed_func::<(u16,), ()>(&mut store, "take-u16")?
         .call(&mut store, (101,))
         .unwrap_err()
         .downcast::<Trap>()?;
     new_instance(&mut store)?
-        .get_typed_func::<(i16,), (), _>(&mut store, "take-s16")?
+        .get_typed_func::<(i16,), ()>(&mut store, "take-s16")?
         .call(&mut store, (101,))
         .unwrap_err()
         .downcast::<Trap>()?;
     new_instance(&mut store)?
-        .get_typed_func::<(u32,), (), _>(&mut store, "take-u32")?
+        .get_typed_func::<(u32,), ()>(&mut store, "take-u32")?
         .call(&mut store, (101,))
         .unwrap_err()
         .downcast::<Trap>()?;
     new_instance(&mut store)?
-        .get_typed_func::<(i32,), (), _>(&mut store, "take-s32")?
+        .get_typed_func::<(i32,), ()>(&mut store, "take-s32")?
         .call(&mut store, (101,))
         .unwrap_err()
         .downcast::<Trap>()?;
     new_instance(&mut store)?
-        .get_typed_func::<(u64,), (), _>(&mut store, "take-u64")?
+        .get_typed_func::<(u64,), ()>(&mut store, "take-u64")?
         .call(&mut store, (101,))
         .unwrap_err()
         .downcast::<Trap>()?;
     new_instance(&mut store)?
-        .get_typed_func::<(i64,), (), _>(&mut store, "take-s64")?
+        .get_typed_func::<(i64,), ()>(&mut store, "take-s64")?
         .call(&mut store, (101,))
         .unwrap_err()
         .downcast::<Trap>()?;
@@ -267,49 +258,49 @@ fn integers() -> Result<()> {
     // Zero can be returned as any integer
     assert_eq!(
         instance
-            .get_typed_func::<(), (u8,), _>(&mut store, "ret-u8")?
+            .get_typed_func::<(), (u8,)>(&mut store, "ret-u8")?
             .call_and_post_return(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i8,), _>(&mut store, "ret-s8")?
+            .get_typed_func::<(), (i8,)>(&mut store, "ret-s8")?
             .call_and_post_return(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (u16,), _>(&mut store, "ret-u16")?
+            .get_typed_func::<(), (u16,)>(&mut store, "ret-u16")?
             .call_and_post_return(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i16,), _>(&mut store, "ret-s16")?
+            .get_typed_func::<(), (i16,)>(&mut store, "ret-s16")?
             .call_and_post_return(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (u32,), _>(&mut store, "ret-u32")?
+            .get_typed_func::<(), (u32,)>(&mut store, "ret-u32")?
             .call_and_post_return(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i32,), _>(&mut store, "ret-s32")?
+            .get_typed_func::<(), (i32,)>(&mut store, "ret-s32")?
             .call_and_post_return(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (u64,), _>(&mut store, "ret-u64")?
+            .get_typed_func::<(), (u64,)>(&mut store, "ret-u64")?
             .call_and_post_return(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i64,), _>(&mut store, "ret-s64")?
+            .get_typed_func::<(), (i64,)>(&mut store, "ret-s64")?
             .call_and_post_return(&mut store, ())?,
         (0,)
     );
@@ -317,49 +308,49 @@ fn integers() -> Result<()> {
     // Returning -1 should reinterpret the bytes as defined by each type.
     assert_eq!(
         instance
-            .get_typed_func::<(), (u8,), _>(&mut store, "retm1-u8")?
+            .get_typed_func::<(), (u8,)>(&mut store, "retm1-u8")?
             .call_and_post_return(&mut store, ())?,
         (0xff,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i8,), _>(&mut store, "retm1-s8")?
+            .get_typed_func::<(), (i8,)>(&mut store, "retm1-s8")?
             .call_and_post_return(&mut store, ())?,
         (-1,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (u16,), _>(&mut store, "retm1-u16")?
+            .get_typed_func::<(), (u16,)>(&mut store, "retm1-u16")?
             .call_and_post_return(&mut store, ())?,
         (0xffff,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i16,), _>(&mut store, "retm1-s16")?
+            .get_typed_func::<(), (i16,)>(&mut store, "retm1-s16")?
             .call_and_post_return(&mut store, ())?,
         (-1,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (u32,), _>(&mut store, "retm1-u32")?
+            .get_typed_func::<(), (u32,)>(&mut store, "retm1-u32")?
             .call_and_post_return(&mut store, ())?,
         (0xffffffff,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i32,), _>(&mut store, "retm1-s32")?
+            .get_typed_func::<(), (i32,)>(&mut store, "retm1-s32")?
             .call_and_post_return(&mut store, ())?,
         (-1,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (u64,), _>(&mut store, "retm1-u64")?
+            .get_typed_func::<(), (u64,)>(&mut store, "retm1-u64")?
             .call_and_post_return(&mut store, ())?,
         (0xffffffff_ffffffff,)
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i64,), _>(&mut store, "retm1-s64")?
+            .get_typed_func::<(), (i64,)>(&mut store, "retm1-s64")?
             .call_and_post_return(&mut store, ())?,
         (-1,)
     );
@@ -368,37 +359,37 @@ fn integers() -> Result<()> {
     let ret: u32 = 100000;
     assert_eq!(
         instance
-            .get_typed_func::<(), (u8,), _>(&mut store, "retbig-u8")?
+            .get_typed_func::<(), (u8,)>(&mut store, "retbig-u8")?
             .call_and_post_return(&mut store, ())?,
         (ret as u8,),
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i8,), _>(&mut store, "retbig-s8")?
+            .get_typed_func::<(), (i8,)>(&mut store, "retbig-s8")?
             .call_and_post_return(&mut store, ())?,
         (ret as i8,),
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (u16,), _>(&mut store, "retbig-u16")?
+            .get_typed_func::<(), (u16,)>(&mut store, "retbig-u16")?
             .call_and_post_return(&mut store, ())?,
         (ret as u16,),
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i16,), _>(&mut store, "retbig-s16")?
+            .get_typed_func::<(), (i16,)>(&mut store, "retbig-s16")?
             .call_and_post_return(&mut store, ())?,
         (ret as i16,),
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (u32,), _>(&mut store, "retbig-u32")?
+            .get_typed_func::<(), (u32,)>(&mut store, "retbig-u32")?
             .call_and_post_return(&mut store, ())?,
         (ret,),
     );
     assert_eq!(
         instance
-            .get_typed_func::<(), (i32,), _>(&mut store, "retbig-s32")?
+            .get_typed_func::<(), (i32,)>(&mut store, "retbig-s32")?
             .call_and_post_return(&mut store, ())?,
         (ret as i32,),
     );
@@ -430,19 +421,19 @@ fn type_layers() -> Result<()> {
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
 
     instance
-        .get_typed_func::<(Box<u32>,), (), _>(&mut store, "take-u32")?
+        .get_typed_func::<(Box<u32>,), ()>(&mut store, "take-u32")?
         .call_and_post_return(&mut store, (Box::new(2),))?;
     instance
-        .get_typed_func::<(&u32,), (), _>(&mut store, "take-u32")?
+        .get_typed_func::<(&u32,), ()>(&mut store, "take-u32")?
         .call_and_post_return(&mut store, (&2,))?;
     instance
-        .get_typed_func::<(Rc<u32>,), (), _>(&mut store, "take-u32")?
+        .get_typed_func::<(Rc<u32>,), ()>(&mut store, "take-u32")?
         .call_and_post_return(&mut store, (Rc::new(2),))?;
     instance
-        .get_typed_func::<(Arc<u32>,), (), _>(&mut store, "take-u32")?
+        .get_typed_func::<(Arc<u32>,), ()>(&mut store, "take-u32")?
         .call_and_post_return(&mut store, (Arc::new(2),))?;
     instance
-        .get_typed_func::<(&Box<Arc<Rc<u32>>>,), (), _>(&mut store, "take-u32")?
+        .get_typed_func::<(&Box<Arc<Rc<u32>>>,), ()>(&mut store, "take-u32")?
         .call_and_post_return(&mut store, (&Box::new(Arc::new(Rc::new(2))),))?;
 
     Ok(())
@@ -491,10 +482,10 @@ fn floats() -> Result<()> {
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let f32_to_u32 = instance.get_typed_func::<(f32,), (u32,), _>(&mut store, "f32-to-u32")?;
-    let f64_to_u64 = instance.get_typed_func::<(f64,), (u64,), _>(&mut store, "f64-to-u64")?;
-    let u32_to_f32 = instance.get_typed_func::<(u32,), (f32,), _>(&mut store, "u32-to-f32")?;
-    let u64_to_f64 = instance.get_typed_func::<(u64,), (f64,), _>(&mut store, "u64-to-f64")?;
+    let f32_to_u32 = instance.get_typed_func::<(f32,), (u32,)>(&mut store, "f32-to-u32")?;
+    let f64_to_u64 = instance.get_typed_func::<(f64,), (u64,)>(&mut store, "f64-to-u64")?;
+    let u32_to_f32 = instance.get_typed_func::<(u32,), (f32,)>(&mut store, "u32-to-f32")?;
+    let u64_to_f64 = instance.get_typed_func::<(u64,), (f64,)>(&mut store, "u64-to-f64")?;
 
     assert_eq!(f32_to_u32.call(&mut store, (1.0,))?, (1.0f32.to_bits(),));
     f32_to_u32.post_return(&mut store)?;
@@ -558,8 +549,8 @@ fn bools() -> Result<()> {
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let u32_to_bool = instance.get_typed_func::<(u32,), (bool,), _>(&mut store, "u32-to-bool")?;
-    let bool_to_u32 = instance.get_typed_func::<(bool,), (u32,), _>(&mut store, "bool-to-u32")?;
+    let u32_to_bool = instance.get_typed_func::<(u32,), (bool,)>(&mut store, "u32-to-bool")?;
+    let bool_to_u32 = instance.get_typed_func::<(bool,), (u32,)>(&mut store, "bool-to-u32")?;
 
     assert_eq!(bool_to_u32.call(&mut store, (false,))?, (0,));
     bool_to_u32.post_return(&mut store)?;
@@ -597,8 +588,8 @@ fn chars() -> Result<()> {
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let u32_to_char = instance.get_typed_func::<(u32,), (char,), _>(&mut store, "u32-to-char")?;
-    let char_to_u32 = instance.get_typed_func::<(char,), (u32,), _>(&mut store, "char-to-u32")?;
+    let u32_to_char = instance.get_typed_func::<(u32,), (char,)>(&mut store, "u32-to-char")?;
+    let char_to_u32 = instance.get_typed_func::<(char,), (u32,)>(&mut store, "char-to-u32")?;
 
     let mut roundtrip = |x: char| -> Result<()> {
         assert_eq!(char_to_u32.call(&mut store, (x,))?, (x as u32,));
@@ -617,7 +608,7 @@ fn chars() -> Result<()> {
     let u32_to_char = |store: &mut Store<()>| {
         Linker::new(&engine)
             .instantiate(&mut *store, &component)?
-            .get_typed_func::<(u32,), (char,), _>(&mut *store, "u32-to-char")
+            .get_typed_func::<(u32,), (char,)>(&mut *store, "u32-to-char")
     };
     let err = u32_to_char(&mut store)?
         .call(&mut store, (0xd800,))
@@ -679,12 +670,12 @@ fn tuple_result() -> Result<()> {
 
     let input = (-1, 100, 3.0, 100.0);
     let output = instance
-        .get_typed_func::<(i8, u16, f32, f64), ((i8, u16, f32, f64),), _>(&mut store, "tuple")?
+        .get_typed_func::<(i8, u16, f32, f64), ((i8, u16, f32, f64),)>(&mut store, "tuple")?
         .call_and_post_return(&mut store, input)?;
     assert_eq!((input,), output);
 
     let invalid_func =
-        instance.get_typed_func::<(), ((i8, u16, f32, f64),), _>(&mut store, "invalid")?;
+        instance.get_typed_func::<(), ((i8, u16, f32, f64),)>(&mut store, "invalid")?;
     let err = invalid_func.call(&mut store, ()).err().unwrap();
     assert!(
         err.to_string().contains("pointer out of bounds of memory"),
@@ -760,13 +751,13 @@ fn strings() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     let list8_to_str =
-        instance.get_typed_func::<(&[u8],), (WasmStr,), _>(&mut store, "list8-to-str")?;
+        instance.get_typed_func::<(&[u8],), (WasmStr,)>(&mut store, "list8-to-str")?;
     let str_to_list8 =
-        instance.get_typed_func::<(&str,), (WasmList<u8>,), _>(&mut store, "str-to-list8")?;
+        instance.get_typed_func::<(&str,), (WasmList<u8>,)>(&mut store, "str-to-list8")?;
     let list16_to_str =
-        instance.get_typed_func::<(&[u16],), (WasmStr,), _>(&mut store, "list16-to-str")?;
+        instance.get_typed_func::<(&[u16],), (WasmStr,)>(&mut store, "list16-to-str")?;
     let str_to_list16 =
-        instance.get_typed_func::<(&str,), (WasmList<u16>,), _>(&mut store, "str-to-list16")?;
+        instance.get_typed_func::<(&str,), (WasmList<u16>,)>(&mut store, "str-to-list16")?;
 
     let mut roundtrip = |x: &str| -> Result<()> {
         let ret = list8_to_str.call(&mut store, (x.as_bytes(),))?.0;
@@ -779,11 +770,14 @@ fn strings() -> Result<()> {
         list16_to_str.post_return(&mut store)?;
 
         let ret = str_to_list8.call(&mut store, (x,))?.0;
-        assert_eq!(ret.iter(&store).collect::<Result<Vec<_>>>()?, x.as_bytes());
+        assert_eq!(
+            ret.iter(&mut store).collect::<Result<Vec<_>>>()?,
+            x.as_bytes()
+        );
         str_to_list8.post_return(&mut store)?;
 
         let ret = str_to_list16.call(&mut store, (x,))?.0;
-        assert_eq!(ret.iter(&store).collect::<Result<Vec<_>>>()?, utf16,);
+        assert_eq!(ret.iter(&mut store).collect::<Result<Vec<_>>>()?, utf16,);
         str_to_list16.post_return(&mut store)?;
 
         Ok(())
@@ -870,16 +864,15 @@ fn many_parameters() -> Result<()> {
                 (param "p2" u64)             ;; offset  8, size 8
                 (param "p3" float32)         ;; offset 16, size 4
                 (param "p4" u8)              ;; offset 20, size 1
-                (param "p5" (tuple))         ;; offset 21, size 0
-                (param "p6" s16)             ;; offset 22, size 2
-                (param "p7" string)          ;; offset 24, size 8
-                (param "p8" (list u32))      ;; offset 32, size 8
-                (param "p9" bool)            ;; offset 40, size 1
-                (param "pa" bool)            ;; offset 41, size 1
-                (param "pb" char)            ;; offset 44, size 4
-                (param "pc" (list bool))     ;; offset 48, size 8
-                (param "pd" (list char))     ;; offset 56, size 8
-                (param "pe" (list string))   ;; offset 64, size 8
+                (param "p5" s16)             ;; offset 22, size 2
+                (param "p6" string)          ;; offset 24, size 8
+                (param "p7" (list u32))      ;; offset 32, size 8
+                (param "p8" bool)            ;; offset 40, size 1
+                (param "p0" bool)            ;; offset 40, size 1
+                (param "pa" char)            ;; offset 44, size 4
+                (param "pb" (list bool))     ;; offset 48, size 8
+                (param "pc" (list char))     ;; offset 56, size 8
+                (param "pd" (list string))   ;; offset 64, size 8
 
                 (result "all-memory" (list u8))
                 (result "pointer" u32)
@@ -903,7 +896,6 @@ fn many_parameters() -> Result<()> {
         u64,
         f32,
         u8,
-        (),
         i16,
         &str,
         &[u32],
@@ -913,14 +905,13 @@ fn many_parameters() -> Result<()> {
         &[bool],
         &[char],
         &[&str],
-    ), (WasmList<u8>, u32), _>(&mut store, "many-param")?;
+    ), (WasmList<u8>, u32)>(&mut store, "many-param")?;
 
     let input = (
         -100,
         u64::MAX / 2,
         f32::from_bits(CANON_32BIT_NAN | 1),
         38,
-        (),
         18831,
         "this is the first string",
         [1, 2, 3, 4, 5, 6, 7, 8].as_slice(),
@@ -948,35 +939,35 @@ fn many_parameters() -> Result<()> {
     assert_eq!(u32::from_le_bytes(*actual.take_n::<4>()), CANON_32BIT_NAN);
     assert_eq!(u8::from_le_bytes(*actual.take_n::<1>()), input.3);
     actual.skip::<1>();
-    assert_eq!(i16::from_le_bytes(*actual.take_n::<2>()), input.5);
-    assert_eq!(actual.ptr_len(memory, 1), input.6.as_bytes());
+    assert_eq!(i16::from_le_bytes(*actual.take_n::<2>()), input.4);
+    assert_eq!(actual.ptr_len(memory, 1), input.5.as_bytes());
     let mut mem = actual.ptr_len(memory, 4);
-    for expected in input.7.iter() {
+    for expected in input.6.iter() {
         assert_eq!(u32::from_le_bytes(*mem.take_n::<4>()), *expected);
     }
     assert!(mem.is_empty());
+    assert_eq!(actual.take_n::<1>(), &[input.7 as u8]);
     assert_eq!(actual.take_n::<1>(), &[input.8 as u8]);
-    assert_eq!(actual.take_n::<1>(), &[input.9 as u8]);
     actual.skip::<2>();
-    assert_eq!(u32::from_le_bytes(*actual.take_n::<4>()), input.10 as u32);
+    assert_eq!(u32::from_le_bytes(*actual.take_n::<4>()), input.9 as u32);
 
     // (list bool)
     mem = actual.ptr_len(memory, 1);
-    for expected in input.11.iter() {
+    for expected in input.10.iter() {
         assert_eq!(mem.take_n::<1>(), &[*expected as u8]);
     }
     assert!(mem.is_empty());
 
     // (list char)
     mem = actual.ptr_len(memory, 4);
-    for expected in input.12.iter() {
+    for expected in input.11.iter() {
         assert_eq!(u32::from_le_bytes(*mem.take_n::<4>()), *expected as u32);
     }
     assert!(mem.is_empty());
 
     // (list string)
     mem = actual.ptr_len(memory, 8);
-    for expected in input.13.iter() {
+    for expected in input.12.iter() {
         let actual = mem.ptr_len(memory, 1);
         assert_eq!(actual, expected.as_bytes());
     }
@@ -1095,7 +1086,7 @@ fn some_traps() -> Result<()> {
 
     // This should fail when calling the allocator function for the argument
     let err = instance(&mut store)?
-        .get_typed_func::<(&[u8],), (), _>(&mut store, "take-list-unreachable")?
+        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-unreachable")?
         .call(&mut store, (&[],))
         .unwrap_err()
         .downcast::<Trap>()?;
@@ -1103,7 +1094,7 @@ fn some_traps() -> Result<()> {
 
     // This should fail when calling the allocator function for the argument
     let err = instance(&mut store)?
-        .get_typed_func::<(&str,), (), _>(&mut store, "take-string-unreachable")?
+        .get_typed_func::<(&str,), ()>(&mut store, "take-string-unreachable")?
         .call(&mut store, ("",))
         .unwrap_err()
         .downcast::<Trap>()?;
@@ -1112,7 +1103,7 @@ fn some_traps() -> Result<()> {
     // This should fail when calling the allocator function for the space
     // to store the arguments (before arguments are even lowered)
     let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), (), _>(
+        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
             &mut store,
             "take-many-unreachable",
         )?
@@ -1137,27 +1128,27 @@ fn some_traps() -> Result<()> {
         );
     }
     let err = instance(&mut store)?
-        .get_typed_func::<(&[u8],), (), _>(&mut store, "take-list-base-oob")?
+        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-base-oob")?
         .call(&mut store, (&[],))
         .unwrap_err();
     assert_oob(&err);
     let err = instance(&mut store)?
-        .get_typed_func::<(&[u8],), (), _>(&mut store, "take-list-base-oob")?
+        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-base-oob")?
         .call(&mut store, (&[1],))
         .unwrap_err();
     assert_oob(&err);
     let err = instance(&mut store)?
-        .get_typed_func::<(&str,), (), _>(&mut store, "take-string-base-oob")?
+        .get_typed_func::<(&str,), ()>(&mut store, "take-string-base-oob")?
         .call(&mut store, ("",))
         .unwrap_err();
     assert_oob(&err);
     let err = instance(&mut store)?
-        .get_typed_func::<(&str,), (), _>(&mut store, "take-string-base-oob")?
+        .get_typed_func::<(&str,), ()>(&mut store, "take-string-base-oob")?
         .call(&mut store, ("x",))
         .unwrap_err();
     assert_oob(&err);
     let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), (), _>(
+        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
             &mut store,
             "take-many-base-oob",
         )?
@@ -1169,29 +1160,29 @@ fn some_traps() -> Result<()> {
     // end of memory that empty things are fine, but larger things are not.
 
     instance(&mut store)?
-        .get_typed_func::<(&[u8],), (), _>(&mut store, "take-list-end-oob")?
+        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-end-oob")?
         .call_and_post_return(&mut store, (&[],))?;
     instance(&mut store)?
-        .get_typed_func::<(&[u8],), (), _>(&mut store, "take-list-end-oob")?
+        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-end-oob")?
         .call_and_post_return(&mut store, (&[1, 2, 3, 4],))?;
     let err = instance(&mut store)?
-        .get_typed_func::<(&[u8],), (), _>(&mut store, "take-list-end-oob")?
+        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-end-oob")?
         .call(&mut store, (&[1, 2, 3, 4, 5],))
         .unwrap_err();
     assert_oob(&err);
     instance(&mut store)?
-        .get_typed_func::<(&str,), (), _>(&mut store, "take-string-end-oob")?
+        .get_typed_func::<(&str,), ()>(&mut store, "take-string-end-oob")?
         .call_and_post_return(&mut store, ("",))?;
     instance(&mut store)?
-        .get_typed_func::<(&str,), (), _>(&mut store, "take-string-end-oob")?
+        .get_typed_func::<(&str,), ()>(&mut store, "take-string-end-oob")?
         .call_and_post_return(&mut store, ("abcd",))?;
     let err = instance(&mut store)?
-        .get_typed_func::<(&str,), (), _>(&mut store, "take-string-end-oob")?
+        .get_typed_func::<(&str,), ()>(&mut store, "take-string-end-oob")?
         .call(&mut store, ("abcde",))
         .unwrap_err();
     assert_oob(&err);
     let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), (), _>(
+        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
             &mut store,
             "take-many-end-oob",
         )?
@@ -1203,7 +1194,7 @@ fn some_traps() -> Result<()> {
     // arguments, is in-bounds but then all further allocations, such as for
     // each individual string, are all out of bounds.
     let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), (), _>(
+        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
             &mut store,
             "take-many-second-oob",
         )?
@@ -1211,7 +1202,7 @@ fn some_traps() -> Result<()> {
         .unwrap_err();
     assert_oob(&err);
     let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), (), _>(
+        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
             &mut store,
             "take-many-second-oob",
         )?
@@ -1267,7 +1258,7 @@ fn char_bool_memory() -> Result<()> {
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let func = instance.get_typed_func::<(u32, u32), (bool, char), _>(&mut store, "ret-tuple")?;
+    let func = instance.get_typed_func::<(u32, u32), (bool, char)>(&mut store, "ret-tuple")?;
 
     let ret = func.call(&mut store, (0, 'a' as u32))?;
     assert_eq!(ret, (false, 'a'));
@@ -1337,10 +1328,10 @@ fn string_list_oob() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let ret_list_u8 = Linker::new(&engine)
         .instantiate(&mut store, &component)?
-        .get_typed_func::<(), (WasmList<u8>,), _>(&mut store, "ret-list-u8")?;
+        .get_typed_func::<(), (WasmList<u8>,)>(&mut store, "ret-list-u8")?;
     let ret_string = Linker::new(&engine)
         .instantiate(&mut store, &component)?
-        .get_typed_func::<(), (WasmStr,), _>(&mut store, "ret-string")?;
+        .get_typed_func::<(), (WasmStr,)>(&mut store, "ret-string")?;
 
     let err = ret_list_u8.call(&mut store, ()).err().unwrap();
     assert!(err.to_string().contains("out of bounds"), "{}", err);
@@ -1394,7 +1385,7 @@ fn tuples() -> Result<()> {
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let foo = instance.get_typed_func::<((i32, f64), (i8,)), ((u16,),), _>(&mut store, "foo")?;
+    let foo = instance.get_typed_func::<((i32, f64), (i8,)), ((u16,),)>(&mut store, "foo")?;
     assert_eq!(foo.call(&mut store, ((0, 1.0), (2,)))?, ((3,),));
 
     Ok(())
@@ -1406,9 +1397,6 @@ fn option() -> Result<()> {
         r#"(component
             (core module $m
                 (memory (export "memory") 1)
-                (func (export "pass0") (param i32) (result i32)
-                    local.get 0
-                )
                 (func (export "pass1") (param i32 i32) (result i32)
                     (local $base i32)
                     (local.set $base
@@ -1453,9 +1441,6 @@ fn option() -> Result<()> {
             )
             (core instance $i (instantiate $m))
 
-            (func (export "option-unit-to-u32") (param "a" (option (tuple))) (result u32)
-                (canon lift (core func $i "pass0"))
-            )
             (func (export "option-u8-to-tuple") (param "a" (option u8)) (result "a" u32) (result "b" u32)
                 (canon lift (core func $i "pass1") (memory $i "memory"))
             )
@@ -1468,9 +1453,6 @@ fn option() -> Result<()> {
                     (memory $i "memory")
                     (realloc (func $i "realloc"))
                 )
-            )
-            (func (export "to-option-unit") (param "a" u32) (result (option (tuple)))
-                (canon lift (core func $i "pass0"))
             )
             (func (export "to-option-u8") (param "a" u32) (param "b" u32) (result (option u8))
                 (canon lift (core func $i "pass1") (memory $i "memory"))
@@ -1496,15 +1478,9 @@ fn option() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let linker = Linker::new(&engine);
     let instance = linker.instantiate(&mut store, &component)?;
-    let option_unit_to_u32 =
-        instance.get_typed_func::<(Option<()>,), (u32,), _>(&mut store, "option-unit-to-u32")?;
-    assert_eq!(option_unit_to_u32.call(&mut store, (None,))?, (0,));
-    option_unit_to_u32.post_return(&mut store)?;
-    assert_eq!(option_unit_to_u32.call(&mut store, (Some(()),))?, (1,));
-    option_unit_to_u32.post_return(&mut store)?;
 
-    let option_u8_to_tuple = instance
-        .get_typed_func::<(Option<u8>,), (u32, u32), _>(&mut store, "option-u8-to-tuple")?;
+    let option_u8_to_tuple =
+        instance.get_typed_func::<(Option<u8>,), (u32, u32)>(&mut store, "option-u8-to-tuple")?;
     assert_eq!(option_u8_to_tuple.call(&mut store, (None,))?, (0, 0));
     option_u8_to_tuple.post_return(&mut store)?;
     assert_eq!(option_u8_to_tuple.call(&mut store, (Some(0),))?, (1, 0));
@@ -1512,8 +1488,8 @@ fn option() -> Result<()> {
     assert_eq!(option_u8_to_tuple.call(&mut store, (Some(100),))?, (1, 100));
     option_u8_to_tuple.post_return(&mut store)?;
 
-    let option_u32_to_tuple = instance
-        .get_typed_func::<(Option<u32>,), (u32, u32), _>(&mut store, "option-u32-to-tuple")?;
+    let option_u32_to_tuple =
+        instance.get_typed_func::<(Option<u32>,), (u32, u32)>(&mut store, "option-u32-to-tuple")?;
     assert_eq!(option_u32_to_tuple.call(&mut store, (None,))?, (0, 0));
     option_u32_to_tuple.post_return(&mut store)?;
     assert_eq!(option_u32_to_tuple.call(&mut store, (Some(0),))?, (1, 0));
@@ -1524,10 +1500,8 @@ fn option() -> Result<()> {
     );
     option_u32_to_tuple.post_return(&mut store)?;
 
-    let option_string_to_tuple = instance.get_typed_func::<(Option<&str>,), (u32, WasmStr), _>(
-        &mut store,
-        "option-string-to-tuple",
-    )?;
+    let option_string_to_tuple = instance
+        .get_typed_func::<(Option<&str>,), (u32, WasmStr)>(&mut store, "option-string-to-tuple")?;
     let (a, b) = option_string_to_tuple.call(&mut store, (None,))?;
     assert_eq!(a, 0);
     assert_eq!(b.to_str(&store)?, "");
@@ -1542,18 +1516,8 @@ fn option() -> Result<()> {
     option_string_to_tuple.post_return(&mut store)?;
 
     let instance = linker.instantiate(&mut store, &component)?;
-    let to_option_unit =
-        instance.get_typed_func::<(u32,), (Option<()>,), _>(&mut store, "to-option-unit")?;
-    assert_eq!(to_option_unit.call(&mut store, (0,))?, (None,));
-    to_option_unit.post_return(&mut store)?;
-    assert_eq!(to_option_unit.call(&mut store, (1,))?, (Some(()),));
-    to_option_unit.post_return(&mut store)?;
-    let err = to_option_unit.call(&mut store, (2,)).unwrap_err();
-    assert!(err.to_string().contains("invalid option"), "{}", err);
-
-    let instance = linker.instantiate(&mut store, &component)?;
     let to_option_u8 =
-        instance.get_typed_func::<(u32, u32), (Option<u8>,), _>(&mut store, "to-option-u8")?;
+        instance.get_typed_func::<(u32, u32), (Option<u8>,)>(&mut store, "to-option-u8")?;
     assert_eq!(to_option_u8.call(&mut store, (0x00_00, 0))?, (None,));
     to_option_u8.post_return(&mut store)?;
     assert_eq!(to_option_u8.call(&mut store, (0x00_01, 0))?, (Some(0),));
@@ -1564,7 +1528,7 @@ fn option() -> Result<()> {
 
     let instance = linker.instantiate(&mut store, &component)?;
     let to_option_u32 =
-        instance.get_typed_func::<(u32, u32), (Option<u32>,), _>(&mut store, "to-option-u32")?;
+        instance.get_typed_func::<(u32, u32), (Option<u32>,)>(&mut store, "to-option-u32")?;
     assert_eq!(to_option_u32.call(&mut store, (0, 0))?, (None,));
     to_option_u32.post_return(&mut store)?;
     assert_eq!(to_option_u32.call(&mut store, (1, 0))?, (Some(0),));
@@ -1578,7 +1542,7 @@ fn option() -> Result<()> {
 
     let instance = linker.instantiate(&mut store, &component)?;
     let to_option_string = instance
-        .get_typed_func::<(u32, &str), (Option<WasmStr>,), _>(&mut store, "to-option-string")?;
+        .get_typed_func::<(u32, &str), (Option<WasmStr>,)>(&mut store, "to-option-string")?;
     let ret = to_option_string.call(&mut store, (0, ""))?.0;
     assert!(ret.is_none());
     to_option_string.post_return(&mut store)?;
@@ -1678,15 +1642,15 @@ fn expected() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let linker = Linker::new(&engine);
     let instance = linker.instantiate(&mut store, &component)?;
-    let take_expected_unit = instance
-        .get_typed_func::<(Result<(), ()>,), (u32,), _>(&mut store, "take-expected-unit")?;
+    let take_expected_unit =
+        instance.get_typed_func::<(Result<(), ()>,), (u32,)>(&mut store, "take-expected-unit")?;
     assert_eq!(take_expected_unit.call(&mut store, (Ok(()),))?, (0,));
     take_expected_unit.post_return(&mut store)?;
     assert_eq!(take_expected_unit.call(&mut store, (Err(()),))?, (1,));
     take_expected_unit.post_return(&mut store)?;
 
     let take_expected_u8_f32 = instance
-        .get_typed_func::<(Result<u8, f32>,), (u32, u32), _>(&mut store, "take-expected-u8-f32")?;
+        .get_typed_func::<(Result<u8, f32>,), (u32, u32)>(&mut store, "take-expected-u8-f32")?;
     assert_eq!(take_expected_u8_f32.call(&mut store, (Ok(1),))?, (0, 1));
     take_expected_u8_f32.post_return(&mut store)?;
     assert_eq!(
@@ -1695,11 +1659,10 @@ fn expected() -> Result<()> {
     );
     take_expected_u8_f32.post_return(&mut store)?;
 
-    let take_expected_string = instance
-        .get_typed_func::<(Result<&str, &[u8]>,), (u32, WasmStr), _>(
-            &mut store,
-            "take-expected-string",
-        )?;
+    let take_expected_string = instance.get_typed_func::<(Result<&str, &[u8]>,), (u32, WasmStr)>(
+        &mut store,
+        "take-expected-string",
+    )?;
     let (a, b) = take_expected_string.call(&mut store, (Ok("hello"),))?;
     assert_eq!(a, 0);
     assert_eq!(b.to_str(&store)?, "hello");
@@ -1711,7 +1674,7 @@ fn expected() -> Result<()> {
 
     let instance = linker.instantiate(&mut store, &component)?;
     let to_expected_unit =
-        instance.get_typed_func::<(u32,), (Result<(), ()>,), _>(&mut store, "to-expected-unit")?;
+        instance.get_typed_func::<(u32,), (Result<(), ()>,)>(&mut store, "to-expected-unit")?;
     assert_eq!(to_expected_unit.call(&mut store, (0,))?, (Ok(()),));
     to_expected_unit.post_return(&mut store)?;
     assert_eq!(to_expected_unit.call(&mut store, (1,))?, (Err(()),));
@@ -1721,7 +1684,7 @@ fn expected() -> Result<()> {
 
     let instance = linker.instantiate(&mut store, &component)?;
     let to_expected_s16_f32 = instance
-        .get_typed_func::<(u32, u32), (Result<i16, f32>,), _>(&mut store, "to-expected-s16-f32")?;
+        .get_typed_func::<(u32, u32), (Result<i16, f32>,)>(&mut store, "to-expected-s16-f32")?;
     assert_eq!(to_expected_s16_f32.call(&mut store, (0, 0))?, (Ok(0),));
     to_expected_s16_f32.post_return(&mut store)?;
     assert_eq!(to_expected_s16_f32.call(&mut store, (0, 100))?, (Ok(100),));
@@ -1801,7 +1764,7 @@ fn fancy_list() -> Result<()> {
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
 
     let func = instance
-        .get_typed_func::<(&[(Option<u8>, Result<(), &str>)],), (u32, u32, WasmList<u8>), _>(
+        .get_typed_func::<(&[(Option<u8>, Result<(), &str>)],), (u32, u32, WasmList<u8>)>(
             &mut store, "take",
         )?;
 
@@ -1932,7 +1895,7 @@ fn invalid_alignment() -> Result<()> {
             &str,
             &str,
             &str,
-        ), (), _>(&mut store, "many-params")?
+        ), ()>(&mut store, "many-params")?
         .call(&mut store, ("", "", "", "", "", "", "", "", "", "", "", ""))
         .unwrap_err();
     assert!(
@@ -1943,7 +1906,7 @@ fn invalid_alignment() -> Result<()> {
     );
 
     let err = instance(&mut store)?
-        .get_typed_func::<(), (WasmStr,), _>(&mut store, "string-ret")?
+        .get_typed_func::<(), (WasmStr,)>(&mut store, "string-ret")?
         .call(&mut store, ())
         .err()
         .unwrap();
@@ -1954,7 +1917,7 @@ fn invalid_alignment() -> Result<()> {
     );
 
     let err = instance(&mut store)?
-        .get_typed_func::<(), (WasmList<u32>,), _>(&mut store, "list-u32-ret")?
+        .get_typed_func::<(), (WasmList<u32>,)>(&mut store, "list-u32-ret")?
         .call(&mut store, ())
         .err()
         .unwrap();
@@ -1991,7 +1954,7 @@ fn drop_component_still_works() -> Result<()> {
                     (export "" (func $f_lower))
                 ))
             ))
-            (func (export "f")
+            (func (export "g")
                 (canon lift
                     (core func $i "f")
                 )
@@ -2015,7 +1978,7 @@ fn drop_component_still_works() -> Result<()> {
         (store, instance)
     };
 
-    let f = instance.get_typed_func::<(), (), _>(&mut store, "f")?;
+    let f = instance.get_typed_func::<(), ()>(&mut store, "g")?;
     assert_eq!(*store.data(), 0);
     f.call(&mut store, ())?;
     assert_eq!(*store.data(), 2);
@@ -2088,7 +2051,7 @@ fn raw_slice_of_various_types() -> Result<()> {
     };
 
     let list = instance
-        .get_typed_func::<(), (WasmList<u8>,), _>(&mut store, "list-u8")?
+        .get_typed_func::<(), (WasmList<u8>,)>(&mut store, "list-u8")?
         .call_and_post_return(&mut store, ())?
         .0;
     assert_eq!(
@@ -2099,7 +2062,7 @@ fn raw_slice_of_various_types() -> Result<()> {
         ]
     );
     let list = instance
-        .get_typed_func::<(), (WasmList<i8>,), _>(&mut store, "list-i8")?
+        .get_typed_func::<(), (WasmList<i8>,)>(&mut store, "list-i8")?
         .call_and_post_return(&mut store, ())?
         .0;
     assert_eq!(
@@ -2111,7 +2074,7 @@ fn raw_slice_of_various_types() -> Result<()> {
     );
 
     let list = instance
-        .get_typed_func::<(), (WasmList<u16>,), _>(&mut store, "list-u16")?
+        .get_typed_func::<(), (WasmList<u16>,)>(&mut store, "list-u16")?
         .call_and_post_return(&mut store, ())?
         .0;
     assert_eq!(
@@ -2128,7 +2091,7 @@ fn raw_slice_of_various_types() -> Result<()> {
         ]
     );
     let list = instance
-        .get_typed_func::<(), (WasmList<i16>,), _>(&mut store, "list-i16")?
+        .get_typed_func::<(), (WasmList<i16>,)>(&mut store, "list-i16")?
         .call_and_post_return(&mut store, ())?
         .0;
     assert_eq!(
@@ -2145,7 +2108,7 @@ fn raw_slice_of_various_types() -> Result<()> {
         ]
     );
     let list = instance
-        .get_typed_func::<(), (WasmList<u32>,), _>(&mut store, "list-u32")?
+        .get_typed_func::<(), (WasmList<u32>,)>(&mut store, "list-u32")?
         .call_and_post_return(&mut store, ())?
         .0;
     assert_eq!(
@@ -2158,7 +2121,7 @@ fn raw_slice_of_various_types() -> Result<()> {
         ]
     );
     let list = instance
-        .get_typed_func::<(), (WasmList<i32>,), _>(&mut store, "list-i32")?
+        .get_typed_func::<(), (WasmList<i32>,)>(&mut store, "list-i32")?
         .call_and_post_return(&mut store, ())?
         .0;
     assert_eq!(
@@ -2171,7 +2134,7 @@ fn raw_slice_of_various_types() -> Result<()> {
         ]
     );
     let list = instance
-        .get_typed_func::<(), (WasmList<u64>,), _>(&mut store, "list-u64")?
+        .get_typed_func::<(), (WasmList<u64>,)>(&mut store, "list-u64")?
         .call_and_post_return(&mut store, ())?
         .0;
     assert_eq!(
@@ -2182,7 +2145,7 @@ fn raw_slice_of_various_types() -> Result<()> {
         ]
     );
     let list = instance
-        .get_typed_func::<(), (WasmList<i64>,), _>(&mut store, "list-i64")?
+        .get_typed_func::<(), (WasmList<i64>,)>(&mut store, "list-i64")?
         .call_and_post_return(&mut store, ())?
         .0;
     assert_eq!(
@@ -2209,7 +2172,7 @@ fn lower_then_lift() -> Result<()> {
   (func $f2 (result s32)
     (canon lift (core func $f_lower))
   )
-  (export "f" (func $f2))
+  (export "f2" (func $f2))
 )
     "#;
 
@@ -2220,7 +2183,7 @@ fn lower_then_lift() -> Result<()> {
     linker.root().func_wrap("f", |_, _: ()| Ok((2u32,)))?;
     let instance = linker.instantiate(&mut store, &component)?;
 
-    let f = instance.get_typed_func::<(), (i32,), _>(&mut store, "f")?;
+    let f = instance.get_typed_func::<(), (i32,)>(&mut store, "f2")?;
     assert_eq!(f.call(&mut store, ())?, (2,));
 
     // First test strings when the import/export ABI happen to line up
@@ -2259,7 +2222,7 @@ fn lower_then_lift() -> Result<()> {
         })?;
     let instance = linker.instantiate(&mut store, &component)?;
 
-    let f = instance.get_typed_func::<(&str,), (), _>(&mut store, "f")?;
+    let f = instance.get_typed_func::<(&str,), ()>(&mut store, "f")?;
     f.call(&mut store, ("hello",))?;
 
     // Next test "type punning" where return values are reinterpreted just
@@ -2299,7 +2262,7 @@ fn lower_then_lift() -> Result<()> {
         })?;
     let instance = linker.instantiate(&mut store, &component)?;
 
-    let f = instance.get_typed_func::<(&str,), (WasmStr,), _>(&mut store, "f")?;
+    let f = instance.get_typed_func::<(&str,), (WasmStr,)>(&mut store, "f")?;
     let err = f.call(&mut store, ("hello",)).err().unwrap();
     assert!(
         err.to_string().contains("return pointer not aligned"),
@@ -2350,19 +2313,19 @@ fn errors_that_poison_instance() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let linker = Linker::new(&engine);
     let instance = linker.instantiate(&mut store, &component)?;
-    let f1 = instance.get_typed_func::<(), (), _>(&mut store, "f1")?;
-    let f2 = instance.get_typed_func::<(), (), _>(&mut store, "f2")?;
+    let f1 = instance.get_typed_func::<(), ()>(&mut store, "f1")?;
+    let f2 = instance.get_typed_func::<(), ()>(&mut store, "f2")?;
     assert_unreachable(f1.call(&mut store, ()));
     assert_poisoned(f1.call(&mut store, ()));
     assert_poisoned(f2.call(&mut store, ()));
 
     let instance = linker.instantiate(&mut store, &component)?;
-    let f3 = instance.get_typed_func::<(&str,), (), _>(&mut store, "f3")?;
+    let f3 = instance.get_typed_func::<(&str,), ()>(&mut store, "f3")?;
     assert_unreachable(f3.call(&mut store, ("x",)));
     assert_poisoned(f3.call(&mut store, ("x",)));
 
     let instance = linker.instantiate(&mut store, &component)?;
-    let f4 = instance.get_typed_func::<(), (WasmStr,), _>(&mut store, "f4")?;
+    let f4 = instance.get_typed_func::<(), (WasmStr,)>(&mut store, "f4")?;
     assert!(f4.call(&mut store, ()).is_err());
     assert_poisoned(f4.call(&mut store, ()));
 
@@ -2386,11 +2349,10 @@ fn errors_that_poison_instance() -> Result<()> {
             Ok(_) => panic!("expected an error"),
             Err(e) => e,
         };
-        assert!(
-            err.to_string()
-                .contains("cannot reenter component instance"),
-            "{}",
-            err,
+        assert_eq!(
+            err.downcast_ref::<Trap>(),
+            Some(&Trap::CannotEnterComponent),
+            "{err}",
         );
     }
 }
@@ -2437,7 +2399,7 @@ fn run_export_with_internal_adapter() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let linker = Linker::new(&engine);
     let instance = linker.instantiate(&mut store, &component)?;
-    let run = instance.get_typed_func::<(), (u32,), _>(&mut store, "run")?;
+    let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
     assert_eq!(run.call(&mut store, ())?, (5,));
     Ok(())
 }

@@ -68,11 +68,6 @@ impl MmapVec {
         Ok(MmapVec::new(mmap, len))
     }
 
-    /// Returns whether the original mmap was created from a readonly mapping.
-    pub fn is_readonly(&self) -> bool {
-        self.mmap.is_readonly()
-    }
-
     /// Splits the collection into two at the given index.
     ///
     /// Returns a separate `MmapVec` which shares the underlying mapping, but
@@ -95,22 +90,26 @@ impl MmapVec {
         return ret;
     }
 
-    /// Makes the specified `range` within this `mmap` to be read/write.
-    pub unsafe fn make_writable(&self, range: Range<usize>) -> Result<()> {
-        self.mmap
-            .make_writable(range.start + self.range.start..range.end + self.range.start)
-    }
-
     /// Makes the specified `range` within this `mmap` to be read/execute.
     pub unsafe fn make_executable(
         &self,
         range: Range<usize>,
         enable_branch_protection: bool,
     ) -> Result<()> {
+        assert!(range.start <= range.end);
+        assert!(range.end <= self.range.len());
         self.mmap.make_executable(
             range.start + self.range.start..range.end + self.range.start,
             enable_branch_protection,
         )
+    }
+
+    /// Makes the specified `range` within this `mmap` to be read-only.
+    pub unsafe fn make_readonly(&self, range: Range<usize>) -> Result<()> {
+        assert!(range.start <= range.end);
+        assert!(range.end <= self.range.len());
+        self.mmap
+            .make_readonly(range.start + self.range.start..range.end + self.range.start)
     }
 
     /// Returns the underlying file that this mmap is mapping, if present.
@@ -128,14 +127,16 @@ impl MmapVec {
 impl Deref for MmapVec {
     type Target = [u8];
 
+    #[inline]
     fn deref(&self) -> &[u8] {
-        &self.mmap.as_slice()[self.range.clone()]
+        // SAFETY: this mmap owns its own range of the underlying mmap so it
+        // should be all good-to-read.
+        unsafe { self.mmap.slice(self.range.clone()) }
     }
 }
 
 impl DerefMut for MmapVec {
     fn deref_mut(&mut self) -> &mut [u8] {
-        debug_assert!(!self.is_readonly());
         // SAFETY: The underlying mmap is protected behind an `Arc` which means
         // there there can be many references to it. We are guaranteed, though,
         // that each reference to the underlying `mmap` has a disjoint `range`
@@ -144,7 +145,8 @@ impl DerefMut for MmapVec {
         // specified in `self.range`. This should allow us to safely hand out
         // mutable access to these bytes if so desired.
         unsafe {
-            let slice = std::slice::from_raw_parts_mut(self.mmap.as_mut_ptr(), self.mmap.len());
+            let slice =
+                std::slice::from_raw_parts_mut(self.mmap.as_ptr().cast_mut(), self.mmap.len());
             &mut slice[self.range.clone()]
         }
     }

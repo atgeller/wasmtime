@@ -1,6 +1,6 @@
 [package]
 name = "cranelift-jit"
-version = "0.92.0"
+version = "0.104.0"
 authors = ["The Cranelift Project Developers"]
 description = "A JIT library backed by Cranelift"
 repository = "https://github.com/bytecodealliance/wasmtime"
@@ -9,11 +9,15 @@ license = "Apache-2.0 WITH LLVM-exception"
 readme = "README.md"
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 cranelift-module = { workspace = true }
 cranelift-native = { workspace = true }
-cranelift-codegen = { workspace = true, default-features = false, features = ["std"] }
+cranelift-codegen = { workspace = true, features = ["std"] }
 cranelift-entity = { workspace = true }
+cranelift-control = { workspace = true }
 anyhow = { workspace = true }
 region = "2.2.0"
 libc = { version = "0.2.42" }
@@ -38,6 +42,3 @@ default = []
 cranelift = { workspace = true }
 cranelift-frontend = { workspace = true }
 cranelift-entity = { workspace = true }
-
-[badges]
-maintenance = { status = "experimental" }

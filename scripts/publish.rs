@@ -25,11 +25,11 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "cranelift-codegen-shared",
     "cranelift-codegen-meta",
     "cranelift-egraph",
+    "cranelift-control",
     "cranelift-codegen",
     "cranelift-reader",
     "cranelift-serde",
     "cranelift-module",
-    "cranelift-preopt",
     "cranelift-frontend",
     "cranelift-wasm",
     "cranelift-native",
@@ -42,20 +42,23 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "wiggle-generate",
     "wiggle-macro",
     // winch
-    "winch-codegen",
     "winch",
     // wasmtime
     "wasmtime-asm-macros",
+    "wasmtime-versioned-export-macros",
     "wasmtime-component-util",
     "wasmtime-wit-bindgen",
     "wasmtime-component-macro",
     "wasmtime-jit-debug",
     "wasmtime-fiber",
     "wasmtime-environ",
+    "wasmtime-wmemcheck",
     "wasmtime-runtime",
+    "wasmtime-cranelift-shared",
     "wasmtime-cranelift",
     "wasmtime-jit",
     "wasmtime-cache",
+    "winch-codegen",
     "wasmtime-winch",
     "wasmtime",
     // wasi-common/wiggle
@@ -65,10 +68,12 @@ const CRATES_TO_PUBLISH: &[&str] = &[
     "wasi-tokio",
     // other misc wasmtime crates
     "wasmtime-wasi",
+    "wasmtime-wasi-http",
     "wasmtime-wasi-nn",
-    "wasmtime-wasi-crypto",
+    "wasmtime-wasi-threads",
     "wasmtime-wast",
     "wasmtime-cli-flags",
+    "wasmtime-explorer",
     "wasmtime-cli",
 ];
 
@@ -79,14 +84,13 @@ const CRATES_TO_PUBLISH: &[&str] = &[
 const PUBLIC_CRATES: &[&str] = &[
     // just here to appease the script because these are submodules of this
     // repository.
-    "wasi-crypto",
     "witx",
     // these are actually public crates which we cannot break the API of in
     // patch releases.
     "wasmtime",
     "wasmtime-wasi",
     "wasmtime-wasi-nn",
-    "wasmtime-wasi-crypto",
+    "wasmtime-wasi-threads",
     "wasmtime-cli",
     // all cranelift crates are considered "public" in that they can't
     // have breaking API changes in patch releases
@@ -95,11 +99,11 @@ const PUBLIC_CRATES: &[&str] = &[
     "cranelift-codegen-shared",
     "cranelift-codegen-meta",
     "cranelift-egraph",
+    "cranelift-control",
     "cranelift-codegen",
     "cranelift-reader",
     "cranelift-serde",
     "cranelift-module",
-    "cranelift-preopt",
     "cranelift-frontend",
     "cranelift-wasm",
     "cranelift-native",
@@ -111,6 +115,8 @@ const PUBLIC_CRATES: &[&str] = &[
     // patch releases as well
     "wasmtime-types",
 ];
+
+const C_HEADER_PATH: &str = "./crates/c-api/include/wasmtime.h";
 
 struct Workspace {
     version: String,
@@ -146,6 +152,8 @@ fn main() {
             for krate in crates.iter() {
                 bump_version(&krate, &crates, name == "bump-patch");
             }
+            // update C API version in wasmtime.h
+            update_capi_version();
             // update the lock file
             assert!(Command::new("cargo")
                 .arg("fetch")
@@ -245,7 +253,7 @@ fn read_crate(ws: Option<&Workspace>, manifest: &Path) -> Crate {
     }
     let name = name.unwrap();
     let version = version.unwrap();
-    if ["witx", "witx-cli", "wasi-crypto"].contains(&&name[..]) {
+    if ["witx", "witx-cli"].contains(&&name[..]) {
         publish = false;
     }
     Crate {
@@ -335,6 +343,34 @@ fn bump_version(krate: &Crate, crates: &[Crate], patch: bool) {
         new_manifest.push_str("\n");
     }
     fs::write(&krate.manifest, new_manifest).unwrap();
+}
+
+fn update_capi_version() {
+    let version = read_crate(None, "./Cargo.toml".as_ref()).version;
+
+    let mut iter = version.split('.').map(|s| s.parse::<u32>().unwrap());
+    let major = iter.next().expect("major version");
+    let minor = iter.next().expect("minor version");
+    let patch = iter.next().expect("patch version");
+
+    let mut new_header = String::new();
+    let contents = fs::read_to_string(C_HEADER_PATH).unwrap();
+    for line in contents.lines() {
+        if line.starts_with("#define WASMTIME_VERSION \"") {
+            new_header.push_str(&format!("#define WASMTIME_VERSION \"{version}\""));
+        } else if line.starts_with("#define WASMTIME_VERSION_MAJOR") {
+            new_header.push_str(&format!("#define WASMTIME_VERSION_MAJOR {major}"));
+        } else if line.starts_with("#define WASMTIME_VERSION_MINOR") {
+            new_header.push_str(&format!("#define WASMTIME_VERSION_MINOR {minor}"));
+        } else if line.starts_with("#define WASMTIME_VERSION_PATCH") {
+            new_header.push_str(&format!("#define WASMTIME_VERSION_PATCH {patch}"));
+        } else {
+            new_header.push_str(line);
+        }
+        new_header.push_str("\n");
+    }
+
+    fs::write(&C_HEADER_PATH, new_header).unwrap();
 }
 
 /// Performs a major version bump increment on the semver version `version`.
@@ -441,6 +477,8 @@ fn publish(krate: &Crate) -> bool {
 // directory registry generated from `cargo vendor` because the versions
 // referenced from `Cargo.toml` may not exist on crates.io.
 fn verify(crates: &[Crate]) {
+    verify_capi();
+
     drop(fs::remove_dir_all(".cargo"));
     drop(fs::remove_dir_all("vendor"));
     let vendor = Command::new("cargo")
@@ -460,10 +498,6 @@ fn verify(crates: &[Crate]) {
         .find(|c| c.name == "witx" && c.manifest.iter().any(|p| p == "wasi-common"))
         .unwrap();
     verify_and_vendor(&witx);
-
-    // Vendor wasi-crypto which is also a path dependency
-    let wasi_crypto = crates.iter().find(|c| c.name == "wasi-crypto").unwrap();
-    verify_and_vendor(&wasi_crypto);
 
     for krate in crates {
         if !krate.publish {
@@ -501,5 +535,35 @@ fn verify(crates: &[Crate]) {
             "{\"files\":{}}",
         )
         .unwrap();
+    }
+
+    fn verify_capi() {
+        let version = read_crate(None, "./Cargo.toml".as_ref()).version;
+
+        let mut iter = version.split('.').map(|s| s.parse::<u32>().unwrap());
+        let major = iter.next().expect("major version");
+        let minor = iter.next().expect("minor version");
+        let patch = iter.next().expect("patch version");
+
+        let mut count = 0;
+        let contents = fs::read_to_string(C_HEADER_PATH).unwrap();
+        for line in contents.lines() {
+            if line.starts_with(&format!("#define WASMTIME_VERSION \"{version}\"")) {
+                count += 1;
+            } else if line.starts_with(&format!("#define WASMTIME_VERSION_MAJOR {major}")) {
+                count += 1;
+            } else if line.starts_with(&format!("#define WASMTIME_VERSION_MINOR {minor}")) {
+                count += 1;
+            } else if line.starts_with(&format!("#define WASMTIME_VERSION_PATCH {patch}")) {
+                count += 1;
+            }
+        }
+
+        assert!(
+            count == 4,
+            "invalid version macros in {}, should match \"{}\"",
+            C_HEADER_PATH,
+            version
+        );
     }
 }

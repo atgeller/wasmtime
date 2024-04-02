@@ -7,29 +7,27 @@ use smallvec::SmallVec;
 
 // Types that the generated ISLE code uses via `use super::*`.
 use super::{
-    fp_reg, lower_condcode, lower_constant_f128, lower_constant_f32, lower_constant_f64,
-    lower_fp_condcode, stack_reg, writable_link_reg, writable_zero_reg, zero_reg, AMode,
-    ASIMDFPModImm, ASIMDMovModImm, BranchTarget, CallIndInfo, CallInfo, Cond, CondBrKind, ExtendOp,
-    FPUOpRI, FPUOpRIMod, FloatCC, Imm12, ImmLogic, ImmShift, Inst as MInst, IntCC, JTSequenceInfo,
-    MachLabel, MemLabel, MoveWideConst, MoveWideOp, NarrowValueMode, Opcode, OperandSize,
-    PairAMode, Reg, SImm9, ScalarSize, ShiftOpAndAmt, UImm12Scaled, UImm5, VecMisc2, VectorSize,
-    NZCV,
+    fp_reg, lower_condcode, lower_fp_condcode, stack_reg, writable_link_reg, writable_zero_reg,
+    zero_reg, ASIMDFPModImm, ASIMDMovModImm, BranchTarget, CallIndInfo, CallInfo, Cond, CondBrKind,
+    ExtendOp, FPUOpRI, FPUOpRIMod, FloatCC, Imm12, ImmLogic, ImmShift, Inst as MInst, IntCC,
+    MachLabel, MemLabel, MoveWideConst, MoveWideOp, Opcode, OperandSize, Reg, SImm9, ScalarSize,
+    ShiftOpAndAmt, UImm12Scaled, UImm5, VecMisc2, VectorSize, NZCV,
 };
-use crate::ir::condcodes;
-use crate::isa::aarch64::inst::{FPULeftShiftImm, FPURightShiftImm};
-use crate::isa::aarch64::lower::{lower_address, lower_pair_address, lower_splat_const};
+use crate::ir::{condcodes, ArgumentExtension};
+use crate::isa;
+use crate::isa::aarch64::inst::{FPULeftShiftImm, FPURightShiftImm, ReturnCallInfo};
 use crate::isa::aarch64::AArch64Backend;
+use crate::machinst::isle::*;
 use crate::machinst::valueregs;
-use crate::machinst::{isle::*, InputSourceInst};
 use crate::{
     binemit::CodeOffset,
     ir::{
-        immediates::*, types::*, AtomicRmwOp, ExternalName, Inst, InstructionData, MemFlags,
-        TrapCode, Value, ValueList,
+        immediates::*, types::*, AtomicRmwOp, BlockCall, ExternalName, Inst, InstructionData,
+        MemFlags, TrapCode, Value, ValueList,
     },
-    isa::aarch64::abi::AArch64Caller,
+    isa::aarch64::abi::AArch64CallSite,
     isa::aarch64::inst::args::{ShiftOp, ShiftOpShiftImm},
-    isa::unwind::UnwindInst,
+    isa::aarch64::inst::SImm7Scaled,
     machinst::{
         abi::ArgPair, ty_bits, InstOutput, Lower, MachInst, VCodeConstant, VCodeConstantData,
     },
@@ -42,8 +40,8 @@ use std::vec::Vec;
 
 type BoxCallInfo = Box<CallInfo>;
 type BoxCallIndInfo = Box<CallIndInfo>;
+type BoxReturnCallInfo = Box<ReturnCallInfo>;
 type VecMachLabel = Vec<MachLabel>;
-type BoxJTSequenceInfo = Box<JTSequenceInfo>;
 type BoxExternalName = Box<ExternalName>;
 type VecArgPair = Vec<ArgPair>;
 
@@ -77,12 +75,70 @@ pub struct ExtendedValue {
 }
 
 impl IsleContext<'_, '_, MInst, AArch64Backend> {
-    isle_prelude_method_helpers!(AArch64Caller);
+    isle_prelude_method_helpers!(AArch64CallSite);
 }
 
 impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
     isle_lower_prelude_methods!();
-    isle_prelude_caller_methods!(crate::isa::aarch64::abi::AArch64MachineDeps, AArch64Caller);
+    isle_prelude_caller_methods!(
+        crate::isa::aarch64::abi::AArch64MachineDeps,
+        AArch64CallSite
+    );
+
+    fn gen_return_call(
+        &mut self,
+        callee_sig: SigRef,
+        callee: ExternalName,
+        distance: RelocDistance,
+        args: ValueSlice,
+    ) -> InstOutput {
+        let caller_conv = isa::CallConv::Tail;
+        debug_assert_eq!(
+            self.lower_ctx.abi().call_conv(self.lower_ctx.sigs()),
+            caller_conv,
+            "Can only do `return_call`s from within a `tail` calling convention function"
+        );
+
+        let call_site = AArch64CallSite::from_func(
+            self.lower_ctx.sigs(),
+            callee_sig,
+            &callee,
+            distance,
+            caller_conv,
+            self.backend.flags().clone(),
+        );
+        call_site.emit_return_call(self.lower_ctx, args, &self.backend.isa_flags);
+
+        InstOutput::new()
+    }
+
+    fn gen_return_call_indirect(
+        &mut self,
+        callee_sig: SigRef,
+        callee: Value,
+        args: ValueSlice,
+    ) -> InstOutput {
+        let caller_conv = isa::CallConv::Tail;
+        debug_assert_eq!(
+            self.lower_ctx.abi().call_conv(self.lower_ctx.sigs()),
+            caller_conv,
+            "Can only do `return_call`s from within a `tail` calling convention function"
+        );
+
+        let callee = self.put_in_reg(callee);
+
+        let call_site = AArch64CallSite::from_ptr(
+            self.lower_ctx.sigs(),
+            callee_sig,
+            callee,
+            Opcode::ReturnCallIndirect,
+            caller_conv,
+            self.backend.flags().clone(),
+        );
+        call_site.emit_return_call(self.lower_ctx, args, &self.backend.isa_flags);
+
+        InstOutput::new()
+    }
 
     fn sign_return_address_disabled(&mut self) -> Option<()> {
         if self.backend.isa_flags.sign_return_address() {
@@ -118,6 +174,14 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
         ImmLogic::maybe_from_u64(n, ty)
     }
 
+    fn imm_size_from_type(&mut self, ty: Type) -> Option<u16> {
+        match ty {
+            I32 => Some(32),
+            I64 => Some(64),
+            _ => None,
+        }
+    }
+
     fn imm_logic_from_imm64(&mut self, ty: Type, n: Imm64) -> Option<ImmLogic> {
         let ty = if ty.bits() < 32 { I32 } else { ty };
         self.imm_logic_from_u64(ty, n.bits() as u64)
@@ -125,10 +189,6 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
 
     fn imm12_from_u64(&mut self, n: u64) -> Option<Imm12> {
         Imm12::maybe_from_u64(n)
-    }
-
-    fn imm12_from_negated_u64(&mut self, n: u64) -> Option<Imm12> {
-        Imm12::maybe_from_u64((n as i64).wrapping_neg() as u64)
     }
 
     fn imm_shift_from_u8(&mut self, n: u8) -> ImmShift {
@@ -155,6 +215,17 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
         if shiftee_bits <= std::u8::MAX as usize {
             let shiftimm = shiftimm.mask(shiftee_bits as u8);
             Some(ShiftOpAndAmt::new(ShiftOp::LSL, shiftimm))
+        } else {
+            None
+        }
+    }
+
+    fn ashr_from_u64(&mut self, ty: Type, n: u64) -> Option<ShiftOpAndAmt> {
+        let shiftimm = ShiftOpShiftImm::maybe_from_shift(n)?;
+        let shiftee_bits = ty_bits(ty);
+        if shiftee_bits <= std::u8::MAX as usize {
+            let shiftimm = shiftimm.mask(shiftee_bits as u8);
+            Some(ShiftOpAndAmt::new(ShiftOp::ASR, shiftimm))
         } else {
             None
         }
@@ -202,6 +273,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
         extend: &generated_code::ImmExtend,
         value: u64,
     ) -> Reg {
+        let pcc = self.backend.flags.enable_pcc();
         let bits = ty.bits();
         let value = if bits < 64 {
             if *extend == generated_code::ImmExtend::Sign {
@@ -231,6 +303,14 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                     imm: MoveWideConst::maybe_with_shift(!lower_halfword, 0).unwrap(),
                     size,
                 });
+                if pcc {
+                    self.lower_ctx.add_range_fact(
+                        rd.to_reg(),
+                        64,
+                        u64::from(value),
+                        u64::from(value),
+                    );
+                }
             } else {
                 self.emit(&MInst::MovWide {
                     op: MoveWideOp::MovZ,
@@ -238,6 +318,14 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                     imm: MoveWideConst::maybe_with_shift(lower_halfword, 0).unwrap(),
                     size,
                 });
+                if pcc {
+                    self.lower_ctx.add_range_fact(
+                        rd.to_reg(),
+                        64,
+                        u64::from(lower_halfword),
+                        u64::from(lower_halfword),
+                    );
+                }
 
                 if upper_halfword != 0 {
                     let tmp = self.temp_writable_reg(I64);
@@ -247,6 +335,10 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                         imm: MoveWideConst::maybe_with_shift(upper_halfword, 16).unwrap(),
                         size,
                     });
+                    if pcc {
+                        self.lower_ctx
+                            .add_range_fact(tmp.to_reg(), 64, value, value);
+                    }
                     return tmp.to_reg();
                 }
             };
@@ -260,6 +352,10 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                 imm: MoveWideConst::zero(),
                 size,
             });
+            if pcc {
+                self.lower_ctx
+                    .add_range_fact(rd.to_reg(), 64, u64::MAX, u64::MAX);
+            }
             return rd.to_reg();
         };
 
@@ -283,6 +379,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
             .collect();
 
         let mut prev_result = None;
+        let mut running_value: u64 = 0;
         for (i, imm16) in halfwords {
             let shift = i * 16;
             let rd = self.temp_writable_reg(I64);
@@ -290,6 +387,11 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
             if let Some(rn) = prev_result {
                 let imm = MoveWideConst::maybe_with_shift(imm16 as u16, shift).unwrap();
                 self.emit(&MInst::MovK { rd, rn, imm, size });
+                if pcc {
+                    running_value |= imm16 << shift;
+                    self.lower_ctx
+                        .add_range_fact(rd.to_reg(), 64, running_value, running_value);
+                }
             } else {
                 if first_is_inverted {
                     let imm =
@@ -300,6 +402,15 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                         imm,
                         size,
                     });
+                    if pcc {
+                        running_value = !(u64::from(imm.bits) << shift);
+                        self.lower_ctx.add_range_fact(
+                            rd.to_reg(),
+                            64,
+                            running_value,
+                            running_value,
+                        );
+                    }
                 } else {
                     let imm = MoveWideConst::maybe_with_shift(imm16 as u16, shift).unwrap();
                     self.emit(&MInst::MovWide {
@@ -308,6 +419,15 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                         imm,
                         size,
                     });
+                    if pcc {
+                        running_value = imm16 << shift;
+                        self.lower_ctx.add_range_fact(
+                            rd.to_reg(),
+                            64,
+                            running_value,
+                            running_value,
+                        );
+                    }
                 }
             }
 
@@ -348,8 +468,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
     }
 
     fn extended_value_from_value(&mut self, val: Value) -> Option<ExtendedValue> {
-        let (val, extend) =
-            super::get_as_extended_value(self.lower_ctx, val, NarrowValueMode::None)?;
+        let (val, extend) = super::get_as_extended_value(self.lower_ctx, val)?;
         Some(ExtendedValue { val, extend })
     }
 
@@ -391,13 +510,6 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
 
     fn writable_zero_reg(&mut self) -> WritableReg {
         writable_zero_reg()
-    }
-
-    fn safe_divisor_from_imm64(&mut self, val: Imm64) -> Option<u64> {
-        match val.bits() {
-            0 | -1 => None,
-            n => Some(n as u64),
-        }
     }
 
     fn shift_mask(&mut self, ty: Type) -> ImmLogic {
@@ -512,46 +624,6 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
         }
     }
 
-    fn amode(&mut self, ty: Type, addr: Value, offset: u32) -> AMode {
-        lower_address(self.lower_ctx, ty, addr, offset as i32)
-    }
-
-    fn pair_amode(&mut self, addr: Value, offset: u32) -> PairAMode {
-        lower_pair_address(self.lower_ctx, addr, offset as i32)
-    }
-
-    fn constant_f32(&mut self, value: u64) -> Reg {
-        let rd = self.temp_writable_reg(I8X16);
-
-        lower_constant_f32(self.lower_ctx, rd, f32::from_bits(value as u32));
-
-        rd.to_reg()
-    }
-
-    fn constant_f64(&mut self, value: u64) -> Reg {
-        let rd = self.temp_writable_reg(I8X16);
-
-        lower_constant_f64(self.lower_ctx, rd, f64::from_bits(value));
-
-        rd.to_reg()
-    }
-
-    fn constant_f128(&mut self, value: u128) -> Reg {
-        let rd = self.temp_writable_reg(I8X16);
-
-        lower_constant_f128(self.lower_ctx, rd, value);
-
-        rd.to_reg()
-    }
-
-    fn splat_const(&mut self, value: u64, size: &VectorSize) -> Reg {
-        let rd = self.temp_writable_reg(I8X16);
-
-        lower_splat_const(self.lower_ctx, rd, value, *size);
-
-        rd.to_reg()
-    }
-
     fn fp_cond_code(&mut self, cc: &condcodes::FloatCC) -> Cond {
         lower_fp_condcode(*cc)
     }
@@ -579,37 +651,18 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
         super::regs::pinned_reg().to_real_reg().unwrap().into()
     }
 
-    fn branch_target(&mut self, elements: &VecMachLabel, idx: u8) -> BranchTarget {
-        BranchTarget::Label(elements[idx as usize])
+    fn branch_target(&mut self, label: MachLabel) -> BranchTarget {
+        BranchTarget::Label(label)
     }
 
-    fn targets_jt_size(&mut self, elements: &VecMachLabel) -> u32 {
-        (elements.len() - 1) as u32
-    }
-
-    fn targets_jt_space(&mut self, elements: &VecMachLabel) -> CodeOffset {
+    fn targets_jt_space(&mut self, elements: &BoxVecMachLabel) -> CodeOffset {
         // calculate the number of bytes needed for the jumptable sequence:
         // 4 bytes per instruction, with 8 instructions base + the size of
         // the jumptable more.
-        4 * (8 + self.targets_jt_size(elements))
-    }
-
-    fn targets_jt_info(&mut self, elements: &VecMachLabel) -> BoxJTSequenceInfo {
-        let targets: Vec<BranchTarget> = elements
-            .iter()
-            .skip(1)
-            .map(|bix| BranchTarget::Label(*bix))
-            .collect();
-        let default_target = BranchTarget::Label(elements[0]);
-        Box::new(JTSequenceInfo {
-            targets,
-            default_target,
-        })
+        (4 * (8 + elements.len())).try_into().unwrap()
     }
 
     fn min_fp_value(&mut self, signed: bool, in_bits: u8, out_bits: u8) -> Reg {
-        let tmp = self.lower_ctx.alloc_tmp(I8X16).only_reg().unwrap();
-
         if in_bits == 32 {
             // From float32.
             let min = match (signed, out_bits) {
@@ -626,7 +679,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                 ),
             };
 
-            lower_constant_f32(self.lower_ctx, tmp, min);
+            generated_code::constructor_constant_f32(self, min.to_bits())
         } else if in_bits == 64 {
             // From float64.
             let min = match (signed, out_bits) {
@@ -643,7 +696,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                 ),
             };
 
-            lower_constant_f64(self.lower_ctx, tmp, min);
+            generated_code::constructor_constant_f64(self, min.to_bits())
         } else {
             unimplemented!(
                 "unexpected input size for min_fp_value: {} (signed: {}, output size: {})",
@@ -652,13 +705,9 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                 out_bits
             );
         }
-
-        tmp.to_reg()
     }
 
     fn max_fp_value(&mut self, signed: bool, in_bits: u8, out_bits: u8) -> Reg {
-        let tmp = self.lower_ctx.alloc_tmp(I8X16).only_reg().unwrap();
-
         if in_bits == 32 {
             // From float32.
             let max = match (signed, out_bits) {
@@ -678,7 +727,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                 ),
             };
 
-            lower_constant_f32(self.lower_ctx, tmp, max);
+            generated_code::constructor_constant_f32(self, max.to_bits())
         } else if in_bits == 64 {
             // From float64.
             let max = match (signed, out_bits) {
@@ -698,7 +747,7 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                 ),
             };
 
-            lower_constant_f64(self.lower_ctx, tmp, max);
+            generated_code::constructor_constant_f64(self, max.to_bits())
         } else {
             unimplemented!(
                 "unexpected input size for max_fp_value: {} (signed: {}, output size: {})",
@@ -707,8 +756,6 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                 out_bits
             );
         }
-
-        tmp.to_reg()
     }
 
     fn fpu_op_ri_ushr(&mut self, ty_bits: u8, shift: u8) -> FPUOpRI {
@@ -737,5 +784,99 @@ impl Context for IsleContext<'_, '_, MInst, AArch64Backend> {
                 shift
             );
         }
+    }
+
+    fn vec_extract_imm4_from_immediate(&mut self, imm: Immediate) -> Option<u8> {
+        let bytes = self.lower_ctx.get_immediate_data(imm).as_slice();
+
+        if bytes.windows(2).all(|a| a[0] + 1 == a[1]) && bytes[0] < 16 {
+            Some(bytes[0])
+        } else {
+            None
+        }
+    }
+
+    fn shuffle_dup8_from_imm(&mut self, imm: Immediate) -> Option<u8> {
+        let bytes = self.lower_ctx.get_immediate_data(imm).as_slice();
+        if bytes.iter().all(|b| *b == bytes[0]) && bytes[0] < 16 {
+            Some(bytes[0])
+        } else {
+            None
+        }
+    }
+    fn shuffle_dup16_from_imm(&mut self, imm: Immediate) -> Option<u8> {
+        let (a, b, c, d, e, f, g, h) = self.shuffle16_from_imm(imm)?;
+        if a == b && b == c && c == d && d == e && e == f && f == g && g == h && a < 8 {
+            Some(a)
+        } else {
+            None
+        }
+    }
+    fn shuffle_dup32_from_imm(&mut self, imm: Immediate) -> Option<u8> {
+        let (a, b, c, d) = self.shuffle32_from_imm(imm)?;
+        if a == b && b == c && c == d && a < 4 {
+            Some(a)
+        } else {
+            None
+        }
+    }
+    fn shuffle_dup64_from_imm(&mut self, imm: Immediate) -> Option<u8> {
+        let (a, b) = self.shuffle64_from_imm(imm)?;
+        if a == b && a < 2 {
+            Some(a)
+        } else {
+            None
+        }
+    }
+
+    fn asimd_mov_mod_imm_zero(&mut self, size: &ScalarSize) -> ASIMDMovModImm {
+        ASIMDMovModImm::zero(*size)
+    }
+
+    fn asimd_mov_mod_imm_from_u64(
+        &mut self,
+        val: u64,
+        size: &ScalarSize,
+    ) -> Option<ASIMDMovModImm> {
+        ASIMDMovModImm::maybe_from_u64(val, *size)
+    }
+
+    fn asimd_fp_mod_imm_from_u64(&mut self, val: u64, size: &ScalarSize) -> Option<ASIMDFPModImm> {
+        ASIMDFPModImm::maybe_from_u64(val, *size)
+    }
+
+    fn u64_low32_bits_unset(&mut self, val: u64) -> Option<u64> {
+        if val & 0xffffffff == 0 {
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    fn shift_masked_imm(&mut self, ty: Type, imm: u64) -> u8 {
+        (imm as u8) & ((ty.lane_bits() - 1) as u8)
+    }
+
+    fn simm7_scaled_from_i64(&mut self, val: i64, ty: Type) -> Option<SImm7Scaled> {
+        SImm7Scaled::maybe_from_i64(val, ty)
+    }
+
+    fn simm9_from_i64(&mut self, val: i64) -> Option<SImm9> {
+        SImm9::maybe_from_i64(val)
+    }
+
+    fn uimm12_scaled_from_i64(&mut self, val: i64, ty: Type) -> Option<UImm12Scaled> {
+        UImm12Scaled::maybe_from_i64(val, ty)
+    }
+
+    fn test_and_compare_bit_const(&mut self, ty: Type, n: u64) -> Option<u8> {
+        if n.count_ones() != 1 {
+            return None;
+        }
+        let bit = n.trailing_zeros();
+        if bit >= ty.bits() {
+            return None;
+        }
+        Some(bit as u8)
     }
 }

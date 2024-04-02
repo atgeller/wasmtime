@@ -4,114 +4,44 @@ use crate::settings::{Flags, OptLevel};
 use anyhow::Result;
 use arbitrary::{Arbitrary, Unstructured};
 use cranelift::codegen::data_value::DataValue;
-use cranelift::codegen::ir::types::*;
-use cranelift::codegen::ir::Function;
+use cranelift::codegen::ir::{types::*, UserExternalName, UserFuncName};
+use cranelift::codegen::ir::{Function, LibCall};
+use cranelift::codegen::isa::{self, Builder};
 use cranelift::codegen::Context;
+use cranelift::prelude::isa::{OwnedTargetIsa, TargetIsa};
+use cranelift::prelude::settings::SettingKind;
 use cranelift::prelude::*;
+use cranelift_arbitrary::CraneliftArbitrary;
 use cranelift_native::builder_with_options;
-use std::fmt;
+use target_isa_extras::TargetIsaExtras;
+use target_lexicon::Architecture;
 
 mod config;
+mod cranelift_arbitrary;
 mod function_generator;
 mod passes;
+mod print;
+mod target_isa_extras;
+
+pub use print::PrintableTestCase;
 
 pub type TestCaseInput = Vec<DataValue>;
 
-/// Simple wrapper to generate a single Cranelift `Function`.
-#[derive(Debug)]
-pub struct SingleFunction(pub Function);
-
-impl<'a> Arbitrary<'a> for SingleFunction {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        FuzzGen::new(u)
-            .generate_func()
-            .map_err(|_| arbitrary::Error::IncorrectFormat)
-            .map(Self)
-    }
-}
-
-pub struct TestCase {
-    /// [Flags] to use when compiling this test case
-    pub flags: Flags,
-    /// Function under test
-    pub func: Function,
-    /// Generate multiple test inputs for each test case.
-    /// This allows us to get more coverage per compilation, which may be somewhat expensive.
-    pub inputs: Vec<TestCaseInput>,
-}
-
-impl fmt::Debug for TestCase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, ";; Fuzzgen test case\n")?;
-        writeln!(f, "test interpret")?;
-        writeln!(f, "test run")?;
-
-        // Print only non default flags
-        let default_flags = Flags::new(settings::builder());
-        for (default, flag) in default_flags.iter().zip(self.flags.iter()) {
-            assert_eq!(default.name, flag.name);
-
-            if default.value_string() != flag.value_string() {
-                writeln!(f, "set {}={}", flag.name, flag.value_string())?;
-            }
-        }
-
-        writeln!(f, "target aarch64")?;
-        writeln!(f, "target s390x")?;
-        writeln!(f, "target riscv64")?;
-        writeln!(f, "target x86_64\n")?;
-
-        writeln!(f, "{}", self.func)?;
-
-        writeln!(f, "; Note: the results in the below test cases are simply a placeholder and probably will be wrong\n")?;
-
-        for input in self.inputs.iter() {
-            // TODO: We don't know the expected outputs, maybe we can run the interpreter
-            // here to figure them out? Should work, however we need to be careful to catch
-            // panics in case its the interpreter that is failing.
-            // For now create a placeholder output consisting of the zero value for the type
-            let returns = &self.func.signature.returns;
-            let placeholder_output = returns
-                .iter()
-                .map(|param| DataValue::read_from_slice(&[0; 16][..], param.value_type))
-                .map(|val| format!("{}", val))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            // If we have no output, we don't need the == condition
-            let test_condition = match returns.len() {
-                0 => String::new(),
-                1 => format!(" == {}", placeholder_output),
-                _ => format!(" == [{}]", placeholder_output),
-            };
-
-            let args = input
-                .iter()
-                .map(|val| format!("{}", val))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            writeln!(f, "; run: {}({}){}", self.func.name, args, test_condition)?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<'a> Arbitrary<'a> for TestCase {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        FuzzGen::new(u)
-            .generate_test()
-            .map_err(|_| arbitrary::Error::IncorrectFormat)
-    }
+pub enum IsaFlagGen {
+    /// When generating ISA flags, ensure that they are all supported by
+    /// the current host.
+    Host,
+    /// All flags available in cranelift are allowed to be generated.
+    /// We also allow generating all possible values for each enum flag.
+    All,
 }
 
 pub struct FuzzGen<'r, 'data>
 where
     'data: 'r,
 {
-    u: &'r mut Unstructured<'data>,
-    config: Config,
+    pub u: &'r mut Unstructured<'data>,
+    pub config: Config,
 }
 
 impl<'r, 'data> FuzzGen<'r, 'data>
@@ -125,28 +55,18 @@ where
         }
     }
 
-    fn generate_datavalue(&mut self, ty: Type) -> Result<DataValue> {
-        Ok(match ty {
-            ty if ty.is_int() => {
-                let imm = match ty {
-                    I8 => self.u.arbitrary::<i8>()? as i128,
-                    I16 => self.u.arbitrary::<i16>()? as i128,
-                    I32 => self.u.arbitrary::<i32>()? as i128,
-                    I64 => self.u.arbitrary::<i64>()? as i128,
-                    I128 => self.u.arbitrary::<i128>()?,
-                    _ => unreachable!(),
-                };
-                DataValue::from_integer(imm, ty)?
-            }
-            // f{32,64}::arbitrary does not generate a bunch of important values
-            // such as Signaling NaN's / NaN's with payload, so generate floats from integers.
-            F32 => DataValue::F32(Ieee32::with_bits(u32::arbitrary(self.u)?)),
-            F64 => DataValue::F64(Ieee64::with_bits(u64::arbitrary(self.u)?)),
-            _ => unimplemented!(),
-        })
+    pub fn generate_signature(&mut self, isa: &dyn TargetIsa) -> Result<Signature> {
+        let max_params = self.u.int_in_range(self.config.signature_params.clone())?;
+        let max_rets = self.u.int_in_range(self.config.signature_rets.clone())?;
+        Ok(self.u.signature(
+            isa.supports_simd(),
+            isa.triple().architecture,
+            max_params,
+            max_rets,
+        )?)
     }
 
-    fn generate_test_inputs(mut self, signature: &Signature) -> Result<Vec<TestCaseInput>> {
+    pub fn generate_test_inputs(mut self, signature: &Signature) -> Result<Vec<TestCaseInput>> {
         let mut inputs = Vec::new();
 
         // Generate up to "max_test_case_inputs" inputs, we need an upper bound here since
@@ -158,7 +78,7 @@ where
             let test_args = signature
                 .params
                 .iter()
-                .map(|p| self.generate_datavalue(p.value_type))
+                .map(|p| self.u.datavalue(p.value_type))
                 .collect::<Result<TestCaseInput>>()?;
 
             inputs.push(test_args);
@@ -224,14 +144,32 @@ where
         Ok(ctx.func)
     }
 
-    fn generate_func(&mut self) -> Result<Function> {
-        let func = FunctionGenerator::new(&mut self.u, &self.config).generate()?;
+    pub fn generate_func(
+        &mut self,
+        name: UserFuncName,
+        isa: OwnedTargetIsa,
+        usercalls: Vec<(UserExternalName, Signature)>,
+        libcalls: Vec<LibCall>,
+    ) -> Result<Function> {
+        let sig = self.generate_signature(&*isa)?;
+
+        let func = FunctionGenerator::new(
+            &mut self.u,
+            &self.config,
+            isa,
+            name,
+            sig,
+            usercalls,
+            libcalls,
+        )
+        .generate()?;
+
         self.run_func_passes(func)
     }
 
     /// Generate a random set of cranelift flags.
     /// Only semantics preserving flags are considered
-    fn generate_flags(&mut self) -> Result<Flags> {
+    pub fn generate_flags(&mut self, target_arch: Architecture) -> Result<Flags> {
         let mut builder = settings::builder();
 
         let opt = self.u.choose(OptLevel::all())?;
@@ -253,7 +191,6 @@ where
             "enable_incremental_compilation_cache_checks",
             "regalloc_checker",
             "enable_llvm_abi_extensions",
-            "use_egraphs",
         ];
         for flag_name in bool_settings {
             let enabled = self
@@ -267,9 +204,16 @@ where
             builder.set(flag_name, value.as_str())?;
         }
 
+        let supports_inline_probestack = match target_arch {
+            Architecture::X86_64 => true,
+            Architecture::Aarch64(_) => true,
+            Architecture::Riscv64(_) => true,
+            _ => false,
+        };
+
         // Optionally test inline stackprobes on supported platforms
         // TODO: Test outlined stack probes.
-        if supports_inline_probestack() && bool::arbitrary(self.u)? {
+        if supports_inline_probestack && bool::arbitrary(self.u)? {
             builder.enable("enable_probestack")?;
             builder.set("probestack_strategy", "inline")?;
 
@@ -279,11 +223,17 @@ where
             builder.set("probestack_size_log2", &format!("{}", size))?;
         }
 
+        // Generate random basic block padding
+        let bb_padding = self
+            .u
+            .int_in_range(self.config.bb_padding_log2_size.clone())?;
+        builder.set("bb_padding_log2_minus_one", &format!("{}", bb_padding))?;
+
         // Fixed settings
 
         // We need llvm ABI extensions for i128 values on x86, so enable it regardless of
         // what we picked above.
-        if cfg!(target_arch = "x86_64") {
+        if target_arch == Architecture::X86_64 {
             builder.enable("enable_llvm_abi_extensions")?;
         }
 
@@ -294,32 +244,63 @@ where
         // so they aren't very interesting to be automatically generated.
         builder.enable("enable_atomics")?;
         builder.enable("enable_float")?;
-        builder.enable("enable_simd")?;
 
         // `machine_code_cfg_info` generates additional metadata for the embedder but this doesn't feed back
         // into compilation anywhere, we leave it on unconditionally to make sure the generation doesn't panic.
         builder.enable("machine_code_cfg_info")?;
 
-        return Ok(Flags::new(builder));
-
-        fn supports_inline_probestack() -> bool {
-            cfg!(target_arch = "x86_64") || cfg!(target_arch = "aarch64")
-        }
+        Ok(Flags::new(builder))
     }
 
-    pub fn generate_test(mut self) -> Result<TestCase> {
-        // If we're generating test inputs as well as a function, then we're planning to execute
-        // this function. That means that any function references in it need to exist. We don't yet
-        // have infrastructure for generating multiple functions, so just don't generate funcrefs.
-        self.config.funcrefs_per_function = 0..=0;
+    /// Generate a random set of ISA flags and apply them to a Builder.
+    ///
+    /// Based on `mode` we can either allow all flags, or just the subset that is
+    /// supported by the current host.
+    ///
+    /// In all cases only a subset of the allowed flags is applied to the builder.
+    pub fn set_isa_flags(&mut self, builder: &mut Builder, mode: IsaFlagGen) -> Result<()> {
+        // `max_isa` is the maximal set of flags that we can use.
+        let max_builder = match mode {
+            IsaFlagGen::All => {
+                let mut max_builder = isa::lookup(builder.triple().clone())?;
 
-        let flags = self.generate_flags()?;
-        let func = self.generate_func()?;
-        let inputs = self.generate_test_inputs(&func.signature)?;
-        Ok(TestCase {
-            flags,
-            func,
-            inputs,
-        })
+                for flag in max_builder.iter() {
+                    match flag.kind {
+                        SettingKind::Bool => {
+                            max_builder.enable(flag.name)?;
+                        }
+                        SettingKind::Enum => {
+                            // Since these are enums there isn't a "max" value per se, pick one at random.
+                            let value = self.u.choose(flag.values.unwrap())?;
+                            max_builder.set(flag.name, value)?;
+                        }
+                        SettingKind::Preset => {
+                            // Presets are just special flags that combine other flags, we don't
+                            // want to enable them directly, just the underlying flags.
+                        }
+                        _ => todo!(),
+                    };
+                }
+                max_builder
+            }
+            // Use `cranelift-native` to do feature detection for us.
+            IsaFlagGen::Host => builder_with_options(true)
+                .expect("Unable to build a TargetIsa for the current host"),
+        };
+        // Cranelift has a somwhat weird API for this, but we need to build the final `TargetIsa` to be able
+        // to extract the values for the ISA flags. We need that to use the `string_value()` that formats
+        // the values so that we can pass it into the builder again.
+        let max_isa = max_builder.finish(Flags::new(settings::builder()))?;
+
+        // We give each of the flags a chance of being copied over. Otherwise we keep the default.
+        for value in max_isa.isa_flags().iter() {
+            let should_copy = bool::arbitrary(self.u)?;
+            if !should_copy {
+                continue;
+            }
+            builder.set(value.name, &value.value_string())?;
+        }
+
+        Ok(())
     }
 }

@@ -42,11 +42,11 @@
 ;;   movz w7, #61436
 ;;   movk w7, w7, #4095, LSL #16
 ;;   subs xzr, x0, x7
-;;   b.ls label1 ; b label3
+;;   b.hi label3 ; b label1
 ;; block1:
 ;;   ldr x9, [x2]
-;;   add x10, x0, #4096
-;;   str w1, [x10, x9]
+;;   add x9, x9, #4096
+;;   str w1, [x9, x0]
 ;;   b label2
 ;; block2:
 ;;   ret
@@ -58,11 +58,11 @@
 ;;   movz w7, #61436
 ;;   movk w7, w7, #4095, LSL #16
 ;;   subs xzr, x0, x7
-;;   b.ls label1 ; b label3
+;;   b.hi label3 ; b label1
 ;; block1:
 ;;   ldr x9, [x1]
-;;   add x8, x0, #4096
-;;   ldr w0, [x8, x9]
+;;   add x8, x9, #4096
+;;   ldr w0, [x8, x0]
 ;;   b label2
 ;; block2:
 ;;   ret

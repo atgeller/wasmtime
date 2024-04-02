@@ -129,7 +129,6 @@ fn harvest_candidate_lhs(
                 | ir::Opcode::Clz
                 | ir::Opcode::Ctz
                 // TODO: ir::Opcode::IaddCarry
-                // TODO: ir::Opcode::IaddCout
                 | ir::Opcode::SaddSat
                 | ir::Opcode::SsubSat
                 | ir::Opcode::UsubSat => true,
@@ -387,7 +386,8 @@ fn harvest_candidate_lhs(
                         let a = arg(allocs, 0);
 
                         // While Cranelift allows any width condition for
-                        // `select`, Souper requires an `i1`.
+                        // `select` and checks it against `0`, Souper requires
+                        // an `i1`. So insert a `ne %x, 0` as needed.
                         let a = match a {
                             ast::Operand::Value(id) => match lhs.get_value(id).r#type {
                                 Some(ast::Type { width: 1 }) => a,
@@ -395,7 +395,14 @@ fn harvest_candidate_lhs(
                                     .assignment(
                                         None,
                                         Some(ast::Type { width: 1 }),
-                                        ast::Instruction::Trunc { a },
+                                        ast::Instruction::Ne {
+                                            a,
+                                            b: ast::Constant {
+                                                value: 0,
+                                                r#type: None,
+                                            }
+                                            .into(),
+                                        },
                                         vec![],
                                     )
                                     .into(),
@@ -462,7 +469,6 @@ fn harvest_candidate_lhs(
                         ast::Instruction::Cttz { a }.into()
                     }
                     // TODO: ir::Opcode::IaddCarry
-                    // TODO: ir::Opcode::IaddCout
                     (ir::Opcode::SaddSat, _) => {
                         let a = arg(allocs, 0);
                         let b = arg(allocs, 1);
@@ -528,9 +534,16 @@ fn souper_type_of(dfg: &ir::DataFlowGraph, val: ir::Value) -> Option<ast::Type> 
     let ty = dfg.value_type(val);
     assert!(ty.is_int());
     assert_eq!(ty.lane_count(), 1);
-    Some(ast::Type {
-        width: ty.bits().try_into().unwrap(),
-    })
+    let width = match dfg.value_def(val).inst() {
+        Some(inst)
+            if dfg.insts[inst].opcode() == ir::Opcode::IcmpImm
+                || dfg.insts[inst].opcode() == ir::Opcode::Icmp =>
+        {
+            1
+        }
+        _ => ty.bits().try_into().unwrap(),
+    };
+    Some(ast::Type { width })
 }
 
 #[derive(Debug)]

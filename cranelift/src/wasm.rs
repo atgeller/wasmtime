@@ -2,15 +2,10 @@
 //! crate.
 //!
 //! Reads Wasm binary/text files, translates the functions' code to Cranelift IR.
-#![cfg_attr(
-    feature = "cargo-clippy",
-    allow(clippy::too_many_arguments, clippy::cognitive_complexity)
-)]
 
 use crate::disasm::print_all;
 use anyhow::{Context as _, Result};
 use clap::Parser;
-use cranelift_codegen::ir::DisplayFunctionAnnotations;
 use cranelift_codegen::print_errors::{pretty_error, pretty_verifier_error};
 use cranelift_codegen::settings::FlagsOrIsa;
 use cranelift_codegen::timing;
@@ -64,54 +59,50 @@ macro_rules! vcprint {
 #[derive(Parser)]
 pub struct Options {
     /// Be more verbose
-    #[clap(short, long)]
+    #[arg(short, long)]
     verbose: bool,
 
     /// Print the resulting Cranelift IR
-    #[clap(short)]
+    #[arg(short)]
     print: bool,
 
     /// Print pass timing report
-    #[clap(short = 'T')]
+    #[arg(short = 'T')]
     report_times: bool,
 
     /// Print machine code disassembly
-    #[clap(short = 'D', long)]
+    #[arg(short = 'D', long)]
     disasm: bool,
 
     /// Configure Cranelift settings
-    #[clap(long = "set")]
+    #[arg(long = "set")]
     settings: Vec<String>,
 
     /// Specify the Cranelift target
-    #[clap(long = "target")]
+    #[arg(long = "target")]
     target: String,
 
     /// Specify an input file to be used. Use '-' for stdin.
     files: Vec<PathBuf>,
 
     /// Print bytecode size
-    #[clap(short = 'X')]
+    #[arg(short = 'X')]
     print_size: bool,
 
     /// Just decode Wasm into Cranelift IR, don't compile it to native code
-    #[clap(short = 't')]
+    #[arg(short = 't')]
     just_decode: bool,
 
     /// Just checks the correctness of Cranelift IR translated from Wasm
-    #[clap(short = 'c')]
+    #[arg(short = 'c')]
     check_translation: bool,
 
-    /// Display values' ranges and their locations
-    #[clap(long = "value-ranges")]
-    value_ranges: bool,
-
     /// Use colors in output? [options: auto/never/always; default: auto]
-    #[clap(long = "color", default_value("auto"))]
+    #[arg(long = "color", default_value("auto"))]
     color: ColorOpt,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 enum ColorOpt {
     Auto,
     Never,
@@ -185,8 +176,7 @@ fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -
         }
     };
 
-    let debug_info = options.value_ranges;
-    let mut dummy_environ = DummyEnvironment::new(isa.frontend_config(), debug_info);
+    let mut dummy_environ = DummyEnvironment::new(isa.frontend_config());
     translate_module(&module_binary, &mut dummy_environ)?;
 
     vcprintln!(options.verbose, use_color, terminal, Color::Green, "ok");
@@ -257,7 +247,7 @@ fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -
             (vec![], vec![], vec![])
         } else {
             let compiled_code = context
-                .compile_and_emit(isa, &mut mem)
+                .compile_and_emit(isa, &mut mem, &mut Default::default())
                 .map_err(|err| anyhow::anyhow!("{}", pretty_error(&err.func, err.inner)))?;
             let code_info = compiled_code.code_info();
 
@@ -296,17 +286,7 @@ fn handle_module(options: &Options, path: &Path, name: &str, fisa: FlagsOrIsa) -
             {
                 println!("; Exported as \"{}\"", export_name);
             }
-            let value_ranges = if options.value_ranges {
-                Some(context.compiled_code().unwrap().value_labels_ranges.clone())
-            } else {
-                None
-            };
-            println!(
-                "{}",
-                context.func.display_with(DisplayFunctionAnnotations {
-                    value_ranges: value_ranges.as_ref(),
-                })
-            );
+            println!("{}", context.func.display());
             vprintln!(options.verbose, "");
         }
 

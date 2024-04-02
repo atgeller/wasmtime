@@ -2,7 +2,7 @@ use super::expression::{CompiledExpression, FunctionFrameInfo};
 use super::utils::{add_internal_types, append_vmctx_info, get_function_frame_info};
 use super::AddressTransform;
 use crate::debug::ModuleMemoryOffset;
-use crate::CompiledFunctions;
+use crate::CompiledFunctionsMetadata;
 use anyhow::{Context, Error};
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_wasm::get_vmctx_value_label;
@@ -11,9 +11,8 @@ use gimli::{self, LineEncoding};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-use wasmparser::ValType as WasmType;
 use wasmtime_environ::{
-    DebugInfoData, DefinedFuncIndex, EntityRef, FuncIndex, FunctionMetadata, WasmFileInfo,
+    DebugInfoData, DefinedFuncIndex, EntityRef, FuncIndex, FunctionMetadata, WasmFileInfo, WasmType,
 };
 
 const PRODUCER_NAME: &str = "wasmtime";
@@ -71,7 +70,7 @@ fn generate_line_info(
             out_program.row().address_offset = address_offset;
             out_program.row().op_index = 0;
             out_program.row().file = file_index;
-            let wasm_offset = w.code_section_offset + addr_map.wasm as u64;
+            let wasm_offset = w.code_section_offset + addr_map.wasm;
             out_program.row().line = wasm_offset;
             out_program.row().column = 0;
             out_program.row().discriminator = 1;
@@ -282,7 +281,7 @@ pub fn generate_simulated_dwarf(
     addr_tr: &AddressTransform,
     di: &DebugInfoData,
     memory_offset: &ModuleMemoryOffset,
-    funcs: &CompiledFunctions,
+    funcs: &CompiledFunctionsMetadata,
     translated: &HashSet<DefinedFuncIndex>,
     out_encoding: gimli::Encoding,
     out_units: &mut write::UnitTable,
@@ -364,7 +363,7 @@ pub fn generate_simulated_dwarf(
         );
         die.set(
             gimli::DW_AT_high_pc,
-            write::AttributeValue::Udata((end - start) as u64),
+            write::AttributeValue::Udata(end - start),
         );
 
         let func_index = imported_func_count + (index as u32);
@@ -384,7 +383,7 @@ pub fn generate_simulated_dwarf(
         );
 
         let f_start = map.addresses[0].wasm;
-        let wasm_offset = di.wasm_file.code_section_offset + f_start as u64;
+        let wasm_offset = di.wasm_file.code_section_offset + f_start;
         die.set(
             gimli::DW_AT_decl_file,
             write::AttributeValue::Udata(wasm_offset),

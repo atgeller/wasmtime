@@ -1,52 +1,59 @@
 use crate::compiler::Compiler;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::sync::Arc;
-use target_lexicon::Triple;
+use wasmtime_cranelift_shared::isa_builder::IsaBuilder;
 use wasmtime_environ::{CompilerBuilder, Setting};
-use winch_codegen::isa;
+use winch_codegen::{isa, TargetIsa};
 
+/// Compiler builder.
 struct Builder {
-    triple: Triple,
+    inner: IsaBuilder<Result<Box<dyn TargetIsa>>>,
 }
 
 pub fn builder() -> Box<dyn CompilerBuilder> {
     Box::new(Builder {
-        triple: Triple::host(),
+        inner: IsaBuilder::new(|triple| isa::lookup(triple).map_err(|e| e.into())),
     })
 }
 
 impl CompilerBuilder for Builder {
     fn triple(&self) -> &target_lexicon::Triple {
-        &self.triple
+        self.inner.triple()
     }
 
     fn target(&mut self, target: target_lexicon::Triple) -> Result<()> {
-        self.triple = target;
+        self.inner.target(target)?;
         Ok(())
     }
 
-    fn set(&mut self, _name: &str, _val: &str) -> Result<()> {
-        Ok(())
+    fn set(&mut self, name: &str, value: &str) -> Result<()> {
+        self.inner.set(name, value)
     }
 
-    fn enable(&mut self, _name: &str) -> Result<()> {
-        Ok(())
+    fn enable(&mut self, name: &str) -> Result<()> {
+        self.inner.enable(name)
     }
 
     fn settings(&self) -> Vec<Setting> {
-        vec![]
+        self.inner.settings()
+    }
+
+    fn set_tunables(&mut self, tunables: wasmtime_environ::Tunables) -> Result<()> {
+        let _ = tunables;
+        Ok(())
     }
 
     fn build(&self) -> Result<Box<dyn wasmtime_environ::Compiler>> {
-        let isa = isa::lookup(self.triple.clone())?;
+        let isa = self.inner.build()?;
+
         Ok(Box::new(Compiler::new(isa)))
     }
 
     fn enable_incremental_compilation(
         &mut self,
         _cache_store: Arc<dyn wasmtime_environ::CacheStore>,
-    ) {
-        todo!()
+    ) -> Result<()> {
+        bail!("incremental compilation is not supported on this platform");
     }
 }
 

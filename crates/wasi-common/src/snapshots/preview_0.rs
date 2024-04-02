@@ -1,4 +1,4 @@
-use crate::file::{FileCaps, FileEntryExt, TableFileExt};
+use crate::file::TableFileExt;
 use crate::sched::{
     subscription::{RwEventFlags, SubscriptionResult},
     Poll, Userdata,
@@ -528,17 +528,14 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         fd: types::Fd,
         iovs: &types::IovecArray<'a>,
     ) -> Result<types::Size, Error> {
-        let f = self
-            .table()
-            .get_file_mut(u32::from(fd))?
-            .get_cap_mut(FileCaps::READ)?;
+        let f = self.table().get_file(u32::from(fd))?;
 
-        let iovs: Vec<wiggle::UnsafeGuestSlice<u8>> = iovs
+        let iovs: Vec<wiggle::GuestPtr<[u8]>> = iovs
             .iter()
             .map(|iov_ptr| {
                 let iov_ptr = iov_ptr?;
                 let iov: types::Iovec = iov_ptr.read()?;
-                Ok(iov.buf.as_array(iov.buf_len).as_unsafe_slice_mut()?)
+                Ok(iov.buf.as_array(iov.buf_len))
             })
             .collect::<Result<_, Error>>()?;
 
@@ -560,24 +557,23 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
             .and_then(|s| Some(s.is_shared_memory()))
             .unwrap_or(false);
         let bytes_read: u64 = if is_shared_memory {
-            // Read into an intermediate buffer.
-            let total_available_size = iovs.iter().fold(0, |a, s| a + s.len());
-            let mut buffer = vec![0; total_available_size.min(MAX_SHARED_BUFFER_SIZE)];
-            let bytes_read = f.read_vectored(&mut [IoSliceMut::new(&mut buffer)]).await?;
-
-            // Copy the intermediate buffer into the Wasm shared memory--`iov`
-            // by `iov`.
-            let mut data_to_write = &buffer[0..];
-            for iov in iovs.into_iter() {
-                let len = data_to_write.len().min(iov.len());
-                iov.copy_from_slice(&data_to_write[0..len])?;
-                data_to_write = &data_to_write[len..];
-                if data_to_write.is_empty() {
-                    break;
-                }
+            // For shared memory, read into an intermediate buffer. Only the
+            // first iov will be filled and even then the read is capped by the
+            // `MAX_SHARED_BUFFER_SIZE`, so users are expected to re-call.
+            let iov = iovs.into_iter().next();
+            if let Some(iov) = iov {
+                let mut buffer = vec![0; (iov.len() as usize).min(MAX_SHARED_BUFFER_SIZE)];
+                let bytes_read = f
+                    .file
+                    .read_vectored(&mut [IoSliceMut::new(&mut buffer)])
+                    .await?;
+                iov.get_range(0..bytes_read.try_into()?)
+                    .expect("it should always be possible to slice the iov smaller")
+                    .copy_from_slice(&buffer[0..bytes_read.try_into()?])?;
+                bytes_read
+            } else {
+                return Ok(0);
             }
-
-            bytes_read
         } else {
             // Convert all of the unsafe guest slices to safe ones--this uses
             // Wiggle's internal borrow checker to ensure no overlaps. We assume
@@ -593,7 +589,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
                 .iter_mut()
                 .map(|s| IoSliceMut::new(&mut *s))
                 .collect();
-            f.read_vectored(&mut ioslices).await?
+            f.file.read_vectored(&mut ioslices).await?
         };
 
         Ok(types::Size::try_from(bytes_read)?)
@@ -605,17 +601,14 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         iovs: &types::IovecArray<'a>,
         offset: types::Filesize,
     ) -> Result<types::Size, Error> {
-        let f = self
-            .table()
-            .get_file_mut(u32::from(fd))?
-            .get_cap_mut(FileCaps::READ | FileCaps::SEEK)?;
+        let f = self.table().get_file(u32::from(fd))?;
 
-        let iovs: Vec<wiggle::UnsafeGuestSlice<u8>> = iovs
+        let iovs: Vec<wiggle::GuestPtr<[u8]>> = iovs
             .iter()
             .map(|iov_ptr| {
                 let iov_ptr = iov_ptr?;
                 let iov: types::Iovec = iov_ptr.read()?;
-                Ok(iov.buf.as_array(iov.buf_len).as_unsafe_slice_mut()?)
+                Ok(iov.buf.as_array(iov.buf_len))
             })
             .collect::<Result<_, Error>>()?;
 
@@ -637,26 +630,23 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
             .and_then(|s| Some(s.is_shared_memory()))
             .unwrap_or(false);
         let bytes_read: u64 = if is_shared_memory {
-            // Read into an intermediate buffer.
-            let total_available_size = iovs.iter().fold(0, |a, s| a + s.len());
-            let mut buffer = vec![0; total_available_size.min(MAX_SHARED_BUFFER_SIZE)];
-            let bytes_read = f
-                .read_vectored_at(&mut [IoSliceMut::new(&mut buffer)], offset)
-                .await?;
-
-            // Copy the intermediate buffer into the Wasm shared memory--`iov`
-            // by `iov`.
-            let mut data_to_write = &buffer[0..];
-            for iov in iovs.into_iter() {
-                let len = data_to_write.len().min(iov.len());
-                iov.copy_from_slice(&data_to_write[0..len])?;
-                data_to_write = &data_to_write[len..];
-                if data_to_write.is_empty() {
-                    break;
-                }
+            // For shared memory, read into an intermediate buffer. Only the
+            // first iov will be filled and even then the read is capped by the
+            // `MAX_SHARED_BUFFER_SIZE`, so users are expected to re-call.
+            let iov = iovs.into_iter().next();
+            if let Some(iov) = iov {
+                let mut buffer = vec![0; (iov.len() as usize).min(MAX_SHARED_BUFFER_SIZE)];
+                let bytes_read = f
+                    .file
+                    .read_vectored_at(&mut [IoSliceMut::new(&mut buffer)], offset)
+                    .await?;
+                iov.get_range(0..bytes_read.try_into()?)
+                    .expect("it should always be possible to slice the iov smaller")
+                    .copy_from_slice(&buffer[0..bytes_read.try_into()?])?;
+                bytes_read
+            } else {
+                return Ok(0);
             }
-
-            bytes_read
         } else {
             // Convert all of the unsafe guest slices to safe ones--this uses
             // Wiggle's internal borrow checker to ensure no overlaps. We assume
@@ -672,7 +662,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
                 .iter_mut()
                 .map(|s| IoSliceMut::new(&mut *s))
                 .collect();
-            f.read_vectored_at(&mut ioslices, offset).await?
+            f.file.read_vectored_at(&mut ioslices, offset).await?
         };
 
         Ok(types::Size::try_from(bytes_read)?)
@@ -683,10 +673,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         fd: types::Fd,
         ciovs: &types::CiovecArray<'a>,
     ) -> Result<types::Size, Error> {
-        let f = self
-            .table()
-            .get_file_mut(u32::from(fd))?
-            .get_cap_mut(FileCaps::WRITE)?;
+        let f = self.table().get_file(u32::from(fd))?;
 
         let guest_slices: Vec<wiggle::GuestCow<u8>> = ciovs
             .iter()
@@ -701,7 +688,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
             .iter()
             .map(|s| IoSlice::new(s.deref()))
             .collect();
-        let bytes_written = f.write_vectored(&ioslices).await?;
+        let bytes_written = f.file.write_vectored(&ioslices).await?;
 
         Ok(types::Size::try_from(bytes_written)?)
     }
@@ -712,10 +699,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         ciovs: &types::CiovecArray<'a>,
         offset: types::Filesize,
     ) -> Result<types::Size, Error> {
-        let f = self
-            .table()
-            .get_file_mut(u32::from(fd))?
-            .get_cap_mut(FileCaps::WRITE | FileCaps::SEEK)?;
+        let f = self.table().get_file(u32::from(fd))?;
 
         let guest_slices: Vec<wiggle::GuestCow<u8>> = ciovs
             .iter()
@@ -730,7 +714,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
             .iter()
             .map(|s| IoSlice::new(s.deref()))
             .collect();
-        let bytes_written = f.write_vectored_at(&ioslices, offset).await?;
+        let bytes_written = f.file.write_vectored_at(&ioslices, offset).await?;
 
         Ok(types::Size::try_from(bytes_written)?)
     }
@@ -961,7 +945,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
             }
         }
 
-        let table = &mut self.table;
+        let table = &self.table;
         let mut sub_fds: HashSet<types::Fd> = HashSet::new();
         // We need these refmuts to outlive Poll, which will hold the &mut dyn WasiFile inside
         let mut reads: Vec<(u32, Userdata)> = Vec::new();
@@ -975,25 +959,22 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
             match sub.u {
                 types::SubscriptionU::Clock(clocksub) => match clocksub.id {
                     types::Clockid::Monotonic => {
-                        let clock = self.clocks.monotonic.deref();
+                        let clock = self.clocks.monotonic()?;
                         let precision = Duration::from_nanos(clocksub.precision);
                         let duration = Duration::from_nanos(clocksub.timeout);
-                        let deadline = if clocksub
+                        let start = if clocksub
                             .flags
                             .contains(types::Subclockflags::SUBSCRIPTION_CLOCK_ABSTIME)
                         {
-                            self.clocks
-                                .creation_time
-                                .checked_add(duration)
-                                .ok_or_else(|| Error::overflow().context("deadline"))?
+                            clock.creation_time
                         } else {
-                            clock
-                                .now(precision)
-                                .checked_add(duration)
-                                .ok_or_else(|| Error::overflow().context("deadline"))?
+                            clock.abs_clock.now(precision)
                         };
+                        let deadline = start
+                            .checked_add(duration)
+                            .ok_or_else(|| Error::overflow().context("deadline"))?;
                         poll.subscribe_monotonic_clock(
-                            clock,
+                            &*clock.abs_clock,
                             deadline,
                             precision,
                             sub.userdata.into(),
@@ -1010,9 +991,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
                     } else {
                         sub_fds.insert(fd);
                     }
-                    table
-                        .get_file_mut(u32::from(fd))?
-                        .get_cap_mut(FileCaps::POLL_READWRITE)?;
+                    table.get_file(u32::from(fd))?;
                     reads.push((u32::from(fd), sub.userdata.into()));
                 }
                 types::SubscriptionU::FdWrite(writesub) => {
@@ -1023,9 +1002,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
                     } else {
                         sub_fds.insert(fd);
                     }
-                    table
-                        .get_file_mut(u32::from(fd))?
-                        .get_cap_mut(FileCaps::POLL_READWRITE)?;
+                    table.get_file(u32::from(fd))?;
                     writes.push((u32::from(fd), sub.userdata.into()));
                 }
             }

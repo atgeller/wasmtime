@@ -8,12 +8,9 @@ pub fn dummy_linker<'module, T>(store: &mut Store<T>, module: &Module) -> Result
     let mut linker = Linker::new(store.engine());
     linker.allow_shadowing(true);
     for import in module.imports() {
+        let extern_ = dummy_extern(store, import.ty())?;
         linker
-            .define(
-                import.module(),
-                import.name(),
-                dummy_extern(store, import.ty())?,
-            )
+            .define(&store, import.module(), import.name(), extern_)
             .unwrap();
     }
     Ok(linker)
@@ -46,7 +43,7 @@ pub fn dummy_value(val_ty: ValType) -> Val {
         ValType::I64 => Val::I64(0),
         ValType::F32 => Val::F32(0),
         ValType::F64 => Val::F64(0),
-        ValType::V128 => Val::V128(0),
+        ValType::V128 => Val::V128(0.into()),
         ValType::ExternRef => Val::ExternRef(None),
         ValType::FuncRef => Val::FuncRef(None),
     }

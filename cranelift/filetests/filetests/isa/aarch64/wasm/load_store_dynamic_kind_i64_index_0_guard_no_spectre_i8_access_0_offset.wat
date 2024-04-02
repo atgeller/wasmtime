@@ -43,7 +43,7 @@
 ;; block0:
 ;;   ldr x5, [x2, #8]
 ;;   subs xzr, x0, x5
-;;   b.lo label1 ; b label3
+;;   b.hs label3 ; b label1
 ;; block1:
 ;;   ldr x7, [x2]
 ;;   strb w1, [x7, x0]
@@ -57,7 +57,7 @@
 ;; block0:
 ;;   ldr x5, [x1, #8]
 ;;   subs xzr, x0, x5
-;;   b.lo label1 ; b label3
+;;   b.hs label3 ; b label1
 ;; block1:
 ;;   ldr x7, [x1]
 ;;   ldrb w0, [x7, x0]

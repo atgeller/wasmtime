@@ -1,3 +1,5 @@
+#[cfg(feature = "coredump")]
+use crate::coredump::WasmCoreDump;
 use crate::store::StoreOpaque;
 use crate::{AsContext, Module};
 use anyhow::Error;
@@ -76,11 +78,15 @@ pub(crate) unsafe fn raise(error: anyhow::Error) -> ! {
 
 #[cold] // traps are exceptional, this helps move handling off the main path
 pub(crate) fn from_runtime_box(
-    store: &StoreOpaque,
+    store: &mut StoreOpaque,
     runtime_trap: Box<wasmtime_runtime::Trap>,
 ) -> Error {
-    let wasmtime_runtime::Trap { reason, backtrace } = *runtime_trap;
-    let (error, pc) = match reason {
+    let wasmtime_runtime::Trap {
+        reason,
+        backtrace,
+        coredumpstack,
+    } = *runtime_trap;
+    let (mut error, pc) = match reason {
         // For user-defined errors they're already an `anyhow::Error` so no
         // conversion is really necessary here, but a `backtrace` may have
         // been captured so it's attempted to get inserted here.
@@ -103,26 +109,41 @@ pub(crate) fn from_runtime_box(
             );
             (error, None)
         }
-        wasmtime_runtime::TrapReason::Jit(pc) => {
+        wasmtime_runtime::TrapReason::Jit { pc, faulting_addr } => {
             let code = store
                 .modules()
                 .lookup_trap_code(pc)
                 .unwrap_or(Trap::StackOverflow);
-            (code.into(), Some(pc))
+            let mut err: Error = code.into();
+
+            // If a fault address was present, for example with segfaults,
+            // then simultaneously assert that it's within a known linear memory
+            // and additionally translate it to a wasm-local address to be added
+            // as context to the error.
+            if let Some(fault) = faulting_addr.and_then(|addr| store.wasm_fault(pc, addr)) {
+                err = err.context(fault);
+            }
+            (err, Some(pc))
         }
         wasmtime_runtime::TrapReason::Wasm(trap_code) => (trap_code.into(), None),
     };
-    match backtrace {
-        Some(bt) => {
-            let bt = WasmBacktrace::from_captured(store, bt, pc);
-            if bt.wasm_trace.is_empty() {
-                error
-            } else {
-                error.context(bt)
-            }
+
+    if let Some(bt) = backtrace {
+        let bt = WasmBacktrace::from_captured(store, bt, pc);
+        if !bt.wasm_trace.is_empty() {
+            error = error.context(bt);
         }
-        None => error,
     }
+
+    let _ = &coredumpstack;
+    #[cfg(feature = "coredump")]
+    if let Some(coredump) = coredumpstack {
+        let bt = WasmBacktrace::from_captured(store, coredump.bt, pc);
+        let cd = WasmCoreDump::new(store, bt);
+        error = error.context(cd);
+    }
+
+    error
 }
 
 /// Representation of a backtrace of function frames in a WebAssembly module for
@@ -254,7 +275,11 @@ impl WasmBacktrace {
     /// always captures a backtrace.
     pub fn force_capture(store: impl AsContext) -> WasmBacktrace {
         let store = store.as_context();
-        Self::from_captured(store.0, wasmtime_runtime::Backtrace::new(), None)
+        Self::from_captured(
+            store.0,
+            wasmtime_runtime::Backtrace::new(store.0.runtime_limits()),
+            None,
+        )
     }
 
     fn from_captured(
@@ -352,7 +377,7 @@ impl fmt::Display for WasmBacktrace {
             } else {
                 needs_newline = true;
             }
-            let name = frame.module_name().unwrap_or("<unknown>");
+            let name = frame.module().name().unwrap_or("<unknown>");
             write!(f, "  {:>3}: ", i)?;
 
             if let Some(offset) = frame.module_offset() {
@@ -404,7 +429,7 @@ impl fmt::Display for WasmBacktrace {
 /// to acquire this `FrameInfo`. For more information see [`WasmBacktrace`].
 #[derive(Debug)]
 pub struct FrameInfo {
-    module_name: Option<String>,
+    module: Module,
     func_index: u32,
     func_name: Option<String>,
     func_start: FilePos,
@@ -417,12 +442,18 @@ impl FrameInfo {
     ///
     /// Returns an object if this `pc` is known to this module, or returns `None`
     /// if no information can be found.
-    pub(crate) fn new(module: &Module, text_offset: usize) -> Option<FrameInfo> {
-        let module = module.compiled_module();
-        let (index, _func_offset) = module.func_by_text_offset(text_offset)?;
-        let info = module.wasm_func_info(index);
-        let instr =
-            wasmtime_environ::lookup_file_pos(module.code_memory().address_map_data(), text_offset);
+    pub(crate) fn new(module: Module, text_offset: usize) -> Option<FrameInfo> {
+        let compiled_module = module.compiled_module();
+        let (index, _func_offset) = compiled_module.func_by_text_offset(text_offset)?;
+        let info = compiled_module.wasm_func_info(index);
+        let func_start = info.start_srcloc;
+        let instr = wasmtime_environ::lookup_file_pos(
+            compiled_module.code_memory().address_map_data(),
+            text_offset,
+        );
+        let index = compiled_module.module().func_index(index);
+        let func_index = index.index() as u32;
+        let func_name = compiled_module.func_name(index).map(|s| s.to_string());
 
         // In debug mode for now assert that we found a mapping for `pc` within
         // the function, because otherwise something is buggy along the way and
@@ -432,7 +463,7 @@ impl FrameInfo {
         // Note that if the module doesn't even have an address map due to
         // compilation settings then it's expected that `instr` is `None`.
         debug_assert!(
-            instr.is_some() || !module.has_address_map(),
+            instr.is_some() || !compiled_module.has_address_map(),
             "failed to find instruction for {:#x}",
             text_offset
         );
@@ -447,10 +478,12 @@ impl FrameInfo {
         // custom section contents.
         let mut symbols = Vec::new();
 
-        if let Some(s) = &module.symbolize_context().ok().and_then(|c| c) {
+        let _ = &mut symbols;
+        #[cfg(feature = "addr2line")]
+        if let Some(s) = &compiled_module.symbolize_context().ok().and_then(|c| c) {
             if let Some(offset) = instr.and_then(|i| i.file_offset()) {
                 let to_lookup = u64::from(offset) - s.code_section_offset();
-                if let Ok(mut frames) = s.addr2line().find_frames(to_lookup) {
+                if let Ok(mut frames) = s.addr2line().find_frames(to_lookup).skip_all_loads() {
                     while let Ok(Some(frame)) = frames.next() {
                         symbols.push(FrameSymbol {
                             name: frame
@@ -471,14 +504,12 @@ impl FrameInfo {
             }
         }
 
-        let index = module.module().func_index(index);
-
         Some(FrameInfo {
-            module_name: module.module().name.clone(),
-            func_index: index.index() as u32,
-            func_name: module.func_name(index).map(|s| s.to_string()),
+            module,
+            func_index,
+            func_name,
             instr,
-            func_start: info.start_srcloc,
+            func_start,
             symbols,
         })
     }
@@ -491,17 +522,11 @@ impl FrameInfo {
         self.func_index
     }
 
-    /// Returns the identifer of the module that this frame is for.
+    /// Returns the module for this frame.
     ///
-    /// Module identifiers are present in the `name` section of a WebAssembly
-    /// binary, but this may not return the exact item in the `name` section.
-    /// Module names can be overwritten at construction time or perhaps inferred
-    /// from file names. The primary purpose of this function is to assist in
-    /// debugging and therefore may be tweaked over time.
-    ///
-    /// This function returns `None` when no name can be found or inferred.
-    pub fn module_name(&self) -> Option<&str> {
-        self.module_name.as_deref()
+    /// This is the module who's code was being run in this frame.
+    pub fn module(&self) -> &Module {
+        &self.module
     }
 
     /// Returns a descriptive name of the function for this frame, if one is

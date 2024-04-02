@@ -16,7 +16,7 @@
 use crate::cursor::{Cursor, FuncCursor};
 use crate::flowgraph::ControlFlowGraph;
 use crate::ir::immediates::Imm64;
-use crate::ir::types::{I128, I64};
+use crate::ir::types::{self, I128, I64};
 use crate::ir::{self, InstBuilder, InstructionData, MemFlags, Value};
 use crate::isa::TargetIsa;
 use crate::trace;
@@ -38,7 +38,17 @@ fn imm_const(pos: &mut FuncCursor, arg: Value, imm: Imm64, is_signed: bool) -> V
             let imm = pos.ins().iconst(I64, imm);
             pos.ins().uextend(I128, imm)
         }
-        _ => pos.ins().iconst(ty.lane_type(), imm),
+        _ => {
+            let bits = imm.bits();
+            let unsigned = match ty.lane_type() {
+                types::I8 => bits as u8 as i64,
+                types::I16 => bits as u16 as i64,
+                types::I32 => bits as u32 as i64,
+                types::I64 => bits,
+                _ => unreachable!(),
+            };
+            pos.ins().iconst(ty.lane_type(), unsigned)
+        }
     }
 }
 
@@ -82,8 +92,10 @@ pub fn simple_legalize(func: &mut ir::Function, cfg: &mut ControlFlowGraph, isa:
 
                     let addr = pos.ins().stack_addr(addr_ty, stack_slot, offset);
 
-                    // Stack slots are required to be accessible and aligned.
-                    let mflags = MemFlags::trusted();
+                    // Stack slots are required to be accessible.
+                    // We can't currently ensure that they are aligned.
+                    let mut mflags = MemFlags::new();
+                    mflags.set_notrap();
                     pos.func.dfg.replace(inst).load(ty, mflags, addr, 0);
                 }
                 InstructionData::StackStore {
@@ -99,10 +111,10 @@ pub fn simple_legalize(func: &mut ir::Function, cfg: &mut ControlFlowGraph, isa:
 
                     let addr = pos.ins().stack_addr(addr_ty, stack_slot, offset);
 
+                    // Stack slots are required to be accessible.
+                    // We can't currently ensure that they are aligned.
                     let mut mflags = MemFlags::new();
-                    // Stack slots are required to be accessible and aligned.
                     mflags.set_notrap();
-                    mflags.set_aligned();
                     pos.func.dfg.replace(inst).store(mflags, arg, addr, 0);
                 }
                 InstructionData::DynamicStackLoad {
@@ -224,6 +236,28 @@ pub fn simple_legalize(func: &mut ir::Function, cfg: &mut ControlFlowGraph, isa:
                     pos.func.dfg.replace(inst).icmp(cond, arg, imm);
                 }
 
+                // Legalize the fused bitwise-plus-not instructions into simpler
+                // instructions to assist with optimizations. Lowering will
+                // pattern match this sequence regardless when architectures
+                // support the instruction natively.
+                InstructionData::Binary { opcode, args } => {
+                    match opcode {
+                        ir::Opcode::BandNot => {
+                            let neg = pos.ins().bnot(args[1]);
+                            pos.func.dfg.replace(inst).band(args[0], neg);
+                        }
+                        ir::Opcode::BorNot => {
+                            let neg = pos.ins().bnot(args[1]);
+                            pos.func.dfg.replace(inst).bor(args[0], neg);
+                        }
+                        ir::Opcode::BxorNot => {
+                            let neg = pos.ins().bnot(args[1]);
+                            pos.func.dfg.replace(inst).bxor(args[0], neg);
+                        }
+                        _ => prev_pos = pos.position(),
+                    };
+                }
+
                 _ => {
                     prev_pos = pos.position();
                     continue;
@@ -268,15 +302,17 @@ fn expand_cond_trap(
     //
     // Becomes:
     //
-    //     brz arg, new_block_resume
-    //     jump new_block_trap
+    //     brif arg, new_block_trap, new_block_resume
     //
     //   new_block_trap:
     //     trap
     //
     //   new_block_resume:
     //     ..
-    let old_block = func.layout.pp_block(inst);
+    let old_block = func
+        .layout
+        .inst_block(inst)
+        .expect("Instruction not in layout.");
     let new_block_trap = func.dfg.make_block();
     let new_block_resume = func.dfg.make_block();
 
@@ -285,17 +321,18 @@ fn expand_cond_trap(
 
     // Replace trap instruction by the inverted condition.
     if trapz {
-        func.dfg.replace(inst).brnz(arg, new_block_resume, &[]);
+        func.dfg
+            .replace(inst)
+            .brif(arg, new_block_resume, &[], new_block_trap, &[]);
     } else {
-        func.dfg.replace(inst).brz(arg, new_block_resume, &[]);
+        func.dfg
+            .replace(inst)
+            .brif(arg, new_block_trap, &[], new_block_resume, &[]);
     }
 
-    // Add jump instruction after the inverted branch.
+    // Insert the new label and the unconditional trap terminator.
     let mut pos = FuncCursor::new(func).after_inst(inst);
     pos.use_srcloc(inst);
-    pos.ins().jump(new_block_trap, &[]);
-
-    // Insert the new label and the unconditional trap terminator.
     pos.insert_block(new_block_trap);
 
     match opcode {

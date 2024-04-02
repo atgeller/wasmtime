@@ -587,7 +587,7 @@ fn test_s390x_binemit() {
                 flags: MemFlags::trusted(),
             },
         },
-        "E3102000004A",
+        "E3102000007A",
         "ahy %r1, 0(%r2)",
     ));
     insns.push((
@@ -7018,31 +7018,24 @@ fn test_s390x_binemit() {
         "basr %r14, %r1",
     ));
 
-    insns.push((
-        Inst::Ret {
-            link: gpr(14),
-            rets: vec![],
-        },
-        "07FE",
-        "br %r14",
-    ));
+    insns.push((Inst::Ret { link: gpr(14) }, "07FE", "br %r14"));
 
-    insns.push((Inst::Debugtrap, "0001", "debugtrap"));
+    insns.push((Inst::Debugtrap, "0001", ".word 0x0001 # debugtrap"));
 
     insns.push((
         Inst::Trap {
             trap_code: TrapCode::StackOverflow,
         },
         "0000",
-        "trap",
+        ".word 0x0000 # trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
             cond: Cond::from_mask(1),
             trap_code: TrapCode::StackOverflow,
         },
-        "A7E400030000",
-        "jno 6 ; trap",
+        "C01400000001",
+        "jgo .+2 # trap=stk_ovf",
     ));
 
     insns.push((
@@ -7999,7 +7992,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B344008C",
-        "ledbra %f8, %f12, 0",
+        "ledbra %f8, 0, %f12, 0",
     ));
     insns.push((
         Inst::FpuRound {
@@ -8029,7 +8022,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B357708C",
-        "fiebr %f8, %f12, 7",
+        "fiebr %f8, 7, %f12",
     ));
     insns.push((
         Inst::FpuRound {
@@ -8039,7 +8032,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B35F708C",
-        "fidbr %f8, %f12, 7",
+        "fidbr %f8, 7, %f12",
     ));
     insns.push((
         Inst::FpuRound {
@@ -8049,7 +8042,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B357608C",
-        "fiebr %f8, %f12, 6",
+        "fiebr %f8, 6, %f12",
     ));
     insns.push((
         Inst::FpuRound {
@@ -8059,7 +8052,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B35F608C",
-        "fidbr %f8, %f12, 6",
+        "fidbr %f8, 6, %f12",
     ));
     insns.push((
         Inst::FpuRound {
@@ -8069,7 +8062,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B357508C",
-        "fiebr %f8, %f12, 5",
+        "fiebr %f8, 5, %f12",
     ));
     insns.push((
         Inst::FpuRound {
@@ -8079,7 +8072,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B35F508C",
-        "fidbr %f8, %f12, 5",
+        "fidbr %f8, 5, %f12",
     ));
     insns.push((
         Inst::FpuRound {
@@ -8089,7 +8082,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B357408C",
-        "fiebr %f8, %f12, 4",
+        "fiebr %f8, 4, %f12",
     ));
     insns.push((
         Inst::FpuRound {
@@ -8099,7 +8092,7 @@ fn test_s390x_binemit() {
             rn: vr(12),
         },
         "B35F408C",
-        "fidbr %f8, %f12, 4",
+        "fidbr %f8, 4, %f12",
     ));
     insns.push((
         Inst::FpuRound {
@@ -13362,7 +13355,9 @@ fn test_s390x_binemit() {
     use crate::settings::Configurable;
     let mut isa_flag_builder = s390x_settings::builder();
     isa_flag_builder.enable("arch13").unwrap();
-    let isa_flags = s390x_settings::Flags::new(&flags, isa_flag_builder);
+    let isa_flags = s390x_settings::Flags::new(&flags, &isa_flag_builder);
+    let ctrl_plane = &mut Default::default();
+    let constants = Default::default();
 
     let emit_info = EmitInfo::new(isa_flags);
     for (insn, expected_encoding, expected_printing) in insns {
@@ -13380,16 +13375,16 @@ fn test_s390x_binemit() {
 
         // Label 0 before the instruction.
         let label0 = buffer.get_label();
-        buffer.bind_label(label0);
+        buffer.bind_label(label0, ctrl_plane);
 
         // Emit the instruction.
         insn.emit(&[], &mut buffer, &emit_info, &mut Default::default());
 
         // Label 1 after the instruction.
         let label1 = buffer.get_label();
-        buffer.bind_label(label1);
+        buffer.bind_label(label1, ctrl_plane);
 
-        let buffer = buffer.finish();
+        let buffer = buffer.finish(&constants, ctrl_plane);
         let actual_encoding = &buffer.stringify_code_bytes();
         assert_eq!(expected_encoding, actual_encoding);
     }

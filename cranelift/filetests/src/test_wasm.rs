@@ -24,6 +24,7 @@ pub fn run(path: &Path, wat: &str) -> Result<()> {
 
     let config: TestConfig =
         toml::from_str(&config_text).context("failed to parse the test configuration")?;
+    log::debug!("Wasm test config = {config:#?}");
 
     config
         .validate()
@@ -57,10 +58,10 @@ pub fn run(path: &Path, wat: &str) -> Result<()> {
             let mut ctx = cranelift_codegen::Context::for_function(func.clone());
             ctx.set_disasm(true);
             let code = ctx
-                .compile(isa)
+                .compile(isa, &mut Default::default())
                 .map_err(|e| crate::pretty_anyhow_error(&e.func, e.inner))?;
             writeln!(&mut actual, "function {}:", func.name).unwrap();
-            writeln!(&mut actual, "{}", code.disasm.as_ref().unwrap()).unwrap();
+            writeln!(&mut actual, "{}", code.vcode.as_ref().unwrap()).unwrap();
         } else if config.optimize {
             let mut ctx = cranelift_codegen::Context::for_function(func.clone());
             ctx.optimize(isa)
@@ -114,7 +115,9 @@ pub fn run(path: &Path, wat: &str) -> Result<()> {
                 }
             }))
             .collect();
-        std::fs::write(path, new_wat_lines.join("\n"))
+        let mut new_wat = new_wat_lines.join("\n");
+        new_wat.push('\n');
+        std::fs::write(path, new_wat)
             .with_context(|| format!("failed to write file: {}", path.display()))?;
         return Ok(());
     }

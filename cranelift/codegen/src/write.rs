@@ -5,6 +5,7 @@
 
 use crate::entity::SecondaryMap;
 use crate::ir::entities::AnyEntity;
+use crate::ir::pcc::Fact;
 use crate::ir::{Block, DataFlowGraph, Function, Inst, SigRef, Type, Value, ValueDef};
 use crate::packed_option::ReservedValue;
 use alloc::string::{String, ToString};
@@ -43,23 +44,29 @@ pub trait FuncWriter {
 
         for (ss, slot) in func.dynamic_stack_slots.iter() {
             any = true;
-            self.write_entity_definition(w, func, ss.into(), slot)?;
+            self.write_entity_definition(w, func, ss.into(), slot, None)?;
         }
 
         for (ss, slot) in func.sized_stack_slots.iter() {
             any = true;
-            self.write_entity_definition(w, func, ss.into(), slot)?;
+            self.write_entity_definition(w, func, ss.into(), slot, None)?;
         }
 
         for (gv, gv_data) in &func.global_values {
             any = true;
-            self.write_entity_definition(w, func, gv.into(), gv_data)?;
+            let maybe_fact = func.global_value_facts[gv].as_ref();
+            self.write_entity_definition(w, func, gv.into(), gv_data, maybe_fact)?;
+        }
+
+        for (mt, mt_data) in &func.memory_types {
+            any = true;
+            self.write_entity_definition(w, func, mt.into(), mt_data, None)?;
         }
 
         for (table, table_data) in &func.tables {
             if !table_data.index_type.is_invalid() {
                 any = true;
-                self.write_entity_definition(w, func, table.into(), table_data)?;
+                self.write_entity_definition(w, func, table.into(), table_data, None)?;
             }
         }
 
@@ -67,7 +74,7 @@ pub trait FuncWriter {
         // signatures.
         for (sig, sig_data) in &func.dfg.signatures {
             any = true;
-            self.write_entity_definition(w, func, sig.into(), &sig_data)?;
+            self.write_entity_definition(w, func, sig.into(), &sig_data, None)?;
         }
 
         for (fnref, ext_func) in &func.dfg.ext_funcs {
@@ -78,23 +85,19 @@ pub trait FuncWriter {
                     func,
                     fnref.into(),
                     &ext_func.display(Some(&func.params)),
+                    None,
                 )?;
             }
         }
 
-        for (jt, jt_data) in &func.jump_tables {
-            any = true;
-            self.write_entity_definition(w, func, jt.into(), jt_data)?;
-        }
-
         for (&cref, cval) in func.dfg.constants.iter() {
             any = true;
-            self.write_entity_definition(w, func, cref.into(), cval)?;
+            self.write_entity_definition(w, func, cref.into(), cval, None)?;
         }
 
         if let Some(limit) = func.stack_limit {
             any = true;
-            self.write_entity_definition(w, func, AnyEntity::StackLimit, &limit)?;
+            self.write_entity_definition(w, func, AnyEntity::StackLimit, &limit, None)?;
         }
 
         Ok(any)
@@ -107,8 +110,9 @@ pub trait FuncWriter {
         func: &Function,
         entity: AnyEntity,
         value: &dyn fmt::Display,
+        maybe_fact: Option<&Fact>,
     ) -> fmt::Result {
-        self.super_entity_definition(w, func, entity, value)
+        self.super_entity_definition(w, func, entity, value, maybe_fact)
     }
 
     /// Default impl of `write_entity_definition`
@@ -119,8 +123,13 @@ pub trait FuncWriter {
         func: &Function,
         entity: AnyEntity,
         value: &dyn fmt::Display,
+        maybe_fact: Option<&Fact>,
     ) -> fmt::Result {
-        writeln!(w, "    {} = {}", entity, value)
+        if let Some(fact) = maybe_fact {
+            writeln!(w, "    {} ! {} = {}", entity, fact, value)
+        } else {
+            writeln!(w, "    {} = {}", entity, value)
+        }
     }
 }
 
@@ -204,7 +213,12 @@ fn write_spec(w: &mut dyn Write, func: &Function) -> fmt::Result {
 // Basic blocks
 
 fn write_arg(w: &mut dyn Write, func: &Function, arg: Value) -> fmt::Result {
-    write!(w, "{}: {}", arg, func.dfg.value_type(arg))
+    let ty = func.dfg.value_type(arg);
+    if let Some(f) = &func.dfg.facts[arg] {
+        write!(w, "{} ! {}: {}", arg, f, ty)
+    } else {
+        write!(w, "{}: {}", arg, ty)
+    }
 }
 
 /// Write out the basic block header, outdented:
@@ -351,6 +365,9 @@ fn write_instruction(
         } else {
             write!(w, ", {}", r)?;
         }
+        if let Some(f) = &func.dfg.facts[*r] {
+            write!(w, " ! {}", f)?;
+        }
     }
     if has_results {
         write!(w, " = ")?;
@@ -377,6 +394,7 @@ fn write_instruction(
 /// Write the operands of `inst` to `w` with a prepended space.
 pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt::Result {
     let pool = &dfg.value_lists;
+    let jump_tables = &dfg.jump_tables;
     use crate::ir::instructions::InstructionData::*;
     match dfg.insts[inst] {
         AtomicRmw { op, args, .. } => write!(w, " {} {}, {}", op, args[0], args[1]),
@@ -414,29 +432,20 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
         IntCompareImm { cond, arg, imm, .. } => write!(w, " {} {}, {}", cond, arg, imm),
         IntAddTrap { args, code, .. } => write!(w, " {}, {}, {}", args[0], args[1], code),
         FloatCompare { cond, args, .. } => write!(w, " {} {}, {}", cond, args[0], args[1]),
-        Jump {
-            destination,
-            ref args,
-            ..
-        } => {
-            write!(w, " {}", destination)?;
-            write_block_args(w, args.as_slice(pool))
+        Jump { destination, .. } => {
+            write!(w, " {}", destination.display(pool))
         }
-        Branch {
-            destination,
-            ref args,
-            ..
-        } => {
-            let args = args.as_slice(pool);
-            write!(w, " {}, {}", args[0], destination)?;
-            write_block_args(w, &args[1..])
-        }
-        BranchTable {
+        Brif {
             arg,
-            destination,
-            table,
+            blocks: [block_then, block_else],
             ..
-        } => write!(w, " {}, {}, {}", arg, destination, table),
+        } => {
+            write!(w, " {}, {}", arg, block_then.display(pool))?;
+            write!(w, ", {}", block_else.display(pool))
+        }
+        BranchTable { arg, table, .. } => {
+            write!(w, " {}, {}", arg, jump_tables[table].display(pool))
+        }
         Call {
             func_ref, ref args, ..
         } => write!(w, " {}({})", func_ref, DisplayValues(args.as_slice(pool))),
@@ -470,7 +479,15 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
             dynamic_stack_slot,
             ..
         } => write!(w, " {}, {}", arg, dynamic_stack_slot),
-        TableAddr { table, arg, .. } => write!(w, " {}, {}", table, arg),
+        TableAddr {
+            table, arg, offset, ..
+        } => {
+            if i32::from(offset) == 0 {
+                write!(w, " {}, {}", table, arg)
+            } else {
+                write!(w, " {}, {}{}", table, arg, offset)
+            }
+        }
         Load {
             flags, arg, offset, ..
         } => write!(w, "{} {}{}", flags, arg, offset),
@@ -485,7 +502,7 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
     }?;
 
     let mut sep = "  ; ";
-    for &arg in dfg.inst_args(inst) {
+    for arg in dfg.inst_values(inst) {
         if let ValueDef::Result(src, _) = dfg.value_def(arg) {
             let imm = match dfg.insts[src] {
                 UnaryImm { imm, .. } => imm.to_string(),
@@ -503,15 +520,6 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
     Ok(())
 }
 
-/// Write block args using optional parantheses.
-fn write_block_args(w: &mut dyn Write, args: &[Value]) -> fmt::Result {
-    if args.is_empty() {
-        Ok(())
-    } else {
-        write!(w, "({})", DisplayValues(args))
-    }
-}
-
 /// Displayable slice of values.
 struct DisplayValues<'a>(&'a [Value]);
 
@@ -522,21 +530,6 @@ impl<'a> fmt::Display for DisplayValues<'a> {
                 write!(f, "{}", val)?;
             } else {
                 write!(f, ", {}", val)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-struct DisplayValuesWithDelimiter<'a>(&'a [Value], char);
-
-impl<'a> fmt::Display for DisplayValuesWithDelimiter<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for (i, val) in self.0.iter().enumerate() {
-            if i == 0 {
-                write!(f, "{}", val)?;
-            } else {
-                write!(f, "{}{}", self.1, val)?;
             }
         }
         Ok(())

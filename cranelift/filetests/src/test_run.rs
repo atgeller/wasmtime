@@ -8,7 +8,7 @@ use crate::subtest::{Context, SubTest};
 use anyhow::Context as _;
 use cranelift_codegen::data_value::DataValue;
 use cranelift_codegen::ir::Type;
-use cranelift_codegen::isa::TargetIsa;
+use cranelift_codegen::isa::{OwnedTargetIsa, TargetIsa};
 use cranelift_codegen::settings::{Configurable, Flags};
 use cranelift_codegen::{ir, settings};
 use cranelift_reader::TestCommand;
@@ -34,7 +34,7 @@ fn build_host_isa(
     infer_native_flags: bool,
     flags: settings::Flags,
     isa_flags: Vec<settings::Value>,
-) -> Box<dyn TargetIsa> {
+) -> OwnedTargetIsa {
     let mut builder = cranelift_native::builder_with_options(infer_native_flags)
         .expect("Unable to build a TargetIsa for the current host");
 
@@ -73,23 +73,40 @@ fn is_isa_compatible(
     // we can't natively support on the host.
     let requested_flags = requested.isa_flags();
     for req_value in requested_flags {
-        if let Some(requested) = req_value.as_bool() {
-            let available_in_host = host
-                .isa_flags()
-                .iter()
-                .find(|val| val.name == req_value.name)
-                .and_then(|val| val.as_bool())
-                .unwrap_or(false);
+        let requested = match req_value.as_bool() {
+            Some(requested) => requested,
+            None => unimplemented!("ISA flag {} of kind {:?}", req_value.name, req_value.kind()),
+        };
+        let available_in_host = host
+            .isa_flags()
+            .iter()
+            .find(|val| val.name == req_value.name)
+            .and_then(|val| val.as_bool())
+            .unwrap_or(false);
 
-            if requested && !available_in_host {
-                return Err(format!(
-                    "skipped {}: host does not support ISA flag {}",
-                    file_path, req_value.name
-                ));
-            }
-        } else {
-            unimplemented!("ISA flag {} of kind {:?}", req_value.name, req_value.kind());
+        if !requested || available_in_host {
+            continue;
         }
+
+        // The AArch64 feature `sign_return_address` is supported on all AArch64
+        // hosts, regardless of whether `cranelift-native` infers it or not. The
+        // instructions emitted with this feature enabled are interpreted as
+        // "hint" noop instructions on CPUs which don't support address
+        // authentication.
+        //
+        // Note that at this time `cranelift-native` will only enable
+        // `sign_return_address` for macOS (notably not Linux) because of a
+        // historical bug in libunwind which causes pointer address signing,
+        // when run on hardware that supports it, so segfault during unwinding.
+        if req_value.name == "sign_return_address" && matches!(host_arch, Architecture::Aarch64(_))
+        {
+            continue;
+        }
+
+        return Err(format!(
+            "skipped {}: host does not support ISA flag {}",
+            file_path, req_value.name
+        ));
     }
 
     Ok(())

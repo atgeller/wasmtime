@@ -8,6 +8,8 @@ pub struct Config {
     /// so we allow the fuzzer to control this by feeding us more or less bytes.
     /// The upper bound here is to prevent too many inputs that cause long test times
     pub max_test_case_inputs: usize,
+    // Number of functions that we generate per testcase
+    pub testcase_funcs: RangeInclusive<usize>,
     pub signature_params: RangeInclusive<usize>,
     pub signature_rets: RangeInclusive<usize>,
     pub instructions_per_block: RangeInclusive<usize>,
@@ -29,8 +31,6 @@ pub struct Config {
     /// The size of the range is controlled by `switch_max_range_size`.
     pub switch_cases: RangeInclusive<usize>,
     pub switch_max_range_size: RangeInclusive<usize>,
-
-    pub funcrefs_per_function: RangeInclusive<usize>,
 
     /// Stack slots.
     /// The combination of these two determines stack usage per function
@@ -63,12 +63,17 @@ pub struct Config {
     /// them, but probably at a lower rate, so that overall execution time isn't
     /// impacted as much
     pub compile_flag_ratio: HashMap<&'static str, (usize, usize)>,
+
+    /// Range of values for the padding between basic blocks. Larger values will
+    /// generate larger functions.
+    pub bb_padding_log2_size: RangeInclusive<usize>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             max_test_case_inputs: 100,
+            testcase_funcs: 1..=8,
             signature_params: 0..=16,
             signature_rets: 0..=16,
             instructions_per_block: 0..=64,
@@ -79,7 +84,6 @@ impl Default for Config {
             switch_cases: 0..=64,
             // Ranges smaller than 2 don't make sense.
             switch_max_range_size: 2..=32,
-            funcrefs_per_function: 0..=8,
             static_stack_slots_per_function: 0..=8,
             static_stack_slot_size: 0..=128,
             // We need the mix of sizes that allows us to:
@@ -101,6 +105,11 @@ impl Default for Config {
             allowed_int_divz_ratio: (1, 1_000_000),
             allowed_fcvt_traps_ratio: (1, 1_000_000),
             compile_flag_ratio: [("regalloc_checker", (1usize, 1000))].into_iter().collect(),
+            // Generate up to 4KiB of padding between basic blocks. Although we only
+            // explicitly generate up to 16 blocks, after SSA construction we can
+            // end up with way more blocks than that (Seeing 400 blocks is not uncommon).
+            // At 4KiB we end up at around 1.5MiB of padding per function, which seems reasonable.
+            bb_padding_log2_size: 0..=12,
         }
     }
 }

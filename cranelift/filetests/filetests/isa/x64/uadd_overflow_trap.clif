@@ -8,15 +8,29 @@ block0(v0: i32):
     return v2
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movq    %rdi, %rax
 ;   addl    %eax, $127, %eax
-;   jnb ; ud2 user0 ;
+;   jb #trap=user0
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %rdi, %rax
+;   addl $0x7f, %eax
+;   jb 0x15
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   ud2 ; trap: user0
 
 function %f1(i32) -> i32 {
 block0(v0: i32):
@@ -25,15 +39,29 @@ block0(v0: i32):
     return v2
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movq    %rdi, %rax
 ;   addl    %eax, $127, %eax
-;   jnb ; ud2 user0 ;
+;   jb #trap=user0
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %rdi, %rax
+;   addl $0x7f, %eax
+;   jb 0x15
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   ud2 ; trap: user0
 
 function %f2(i32, i32) -> i32 {
 block0(v0: i32, v1: i32):
@@ -41,15 +69,29 @@ block0(v0: i32, v1: i32):
     return v2
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movq    %rdi, %rax
 ;   addl    %eax, %esi, %eax
-;   jnb ; ud2 user0 ;
+;   jb #trap=user0
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %rdi, %rax
+;   addl %esi, %eax
+;   jb 0x14
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   ud2 ; trap: user0
 
 function %f3(i64) -> i64 {
 block0(v0: i64):
@@ -58,15 +100,29 @@ block0(v0: i64):
     return v2
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movq    %rdi, %rax
 ;   addq    %rax, $127, %rax
-;   jnb ; ud2 user0 ;
+;   jb #trap=user0
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %rdi, %rax
+;   addq $0x7f, %rax
+;   jb 0x16
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   ud2 ; trap: user0
 
 function %f3(i64) -> i64 {
 block0(v0: i64):
@@ -75,15 +131,29 @@ block0(v0: i64):
     return v2
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movq    %rdi, %rax
 ;   addq    %rax, $127, %rax
-;   jnb ; ud2 user0 ;
+;   jb #trap=user0
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %rdi, %rax
+;   addq $0x7f, %rax
+;   jb 0x16
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   ud2 ; trap: user0
 
 function %f4(i64, i64) -> i64 {
 block0(v0: i64, v1: i64):
@@ -91,13 +161,27 @@ block0(v0: i64, v1: i64):
     return v2
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
 ;   movq    %rdi, %rax
 ;   addq    %rax, %rsi, %rax
-;   jnb ; ud2 user0 ;
+;   jb #trap=user0
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movq %rdi, %rax
+;   addq %rsi, %rax
+;   jb 0x15
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   ud2 ; trap: user0
 

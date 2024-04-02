@@ -1,7 +1,11 @@
 //! X64 register definition.
 
-use crate::isa::reg::Reg;
+use crate::{
+    isa::{reg::Reg, CallingConvention},
+    masm::OperandSize,
+};
 use regalloc2::{PReg, RegClass};
+use smallvec::{smallvec, SmallVec};
 
 const ENC_RAX: u8 = 0;
 const ENC_RCX: u8 = 1;
@@ -50,18 +54,25 @@ pub(crate) fn r9() -> Reg {
 pub(crate) fn r10() -> Reg {
     gpr(ENC_R10)
 }
-pub(crate) fn r11() -> Reg {
-    gpr(ENC_R11)
-}
 pub(crate) fn r12() -> Reg {
     gpr(ENC_R12)
 }
 pub(crate) fn r13() -> Reg {
     gpr(ENC_R13)
 }
+/// Used as a pinned register to hold
+/// the `VMContext`.
+/// Non-allocatable in Winch's default
+/// ABI, and callee-saved in SystemV and
+/// Fastcall.
 pub(crate) fn r14() -> Reg {
     gpr(ENC_R14)
 }
+
+pub(crate) fn vmctx() -> Reg {
+    r14()
+}
+
 pub(crate) fn rbx() -> Reg {
     gpr(ENC_RBX)
 }
@@ -77,8 +88,27 @@ pub(crate) fn rbp() -> Reg {
     gpr(ENC_RBP)
 }
 
+/// Used as the scratch register.
+/// Non-allocatable in Winch's default
+/// ABI.
+pub(crate) fn r11() -> Reg {
+    gpr(ENC_R11)
+}
+
 pub(crate) fn scratch() -> Reg {
     r11()
+}
+
+/// This register is used as a scratch register, in the context of trampolines only,
+/// where we assume that callee-saved registers are given the correct handling
+/// according to the system ABI. r12 is chosen given that it's a callee-saved,
+/// non-argument register.
+///
+/// In the context of all other internal functions, this register is not excluded
+/// from register allocation, so no extra assumptions should be made regarding
+/// its availability.
+pub(crate) fn argv() -> Reg {
+    r12()
 }
 
 fn fpr(enc: u8) -> Reg {
@@ -136,103 +166,82 @@ pub(crate) fn xmm15() -> Reg {
     fpr(15)
 }
 
+pub(crate) fn scratch_xmm() -> Reg {
+    xmm15()
+}
+
+/// GPR count.
 const GPR: u32 = 16;
+/// FPR count.
+const FPR: u32 = 16;
+/// GPR index bound.
+pub(crate) const MAX_GPR: u32 = GPR;
+/// GPR index bound.
+pub(crate) const MAX_FPR: u32 = FPR;
 const ALLOCATABLE_GPR: u32 = (1 << GPR) - 1;
-const NON_ALLOCATABLE_GPR: u32 = (1 << ENC_RBP) | (1 << ENC_RSP) | (1 << ENC_R11);
+const ALLOCATABLE_FPR: u32 = (1 << FPR) - 1;
+/// Bitmask of non-alloctable GPRs.
+// R11: Is used as the scratch register.
+// R14: Is a pinned register, used as the instance register.
+pub(crate) const NON_ALLOCATABLE_GPR: u32 =
+    (1 << ENC_RBP) | (1 << ENC_RSP) | (1 << ENC_R11) | (1 << ENC_R14);
+
+/// Bitmask of non-alloctable FPRs.
+// xmm15: Is used as the scratch register.
+pub(crate) const NON_ALLOCATABLE_FPR: u32 = 1 << 15;
 
 /// Bitmask to represent the available general purpose registers.
 pub(crate) const ALL_GPR: u32 = ALLOCATABLE_GPR & !NON_ALLOCATABLE_GPR;
+/// Bitmask to represent the available floating point registers.
+pub(crate) const ALL_FPR: u32 = ALLOCATABLE_FPR & !NON_ALLOCATABLE_FPR;
 
-// Temporarily removing the % from the register name
-// for debugging purposes only until winch gets disasm
-// support.
-pub(crate) fn reg_name(reg: Reg, size: u8) -> &'static str {
-    match reg.class() {
-        RegClass::Int => match (reg.hw_enc() as u8, size) {
-            (ENC_RAX, 8) => "rax",
-            (ENC_RAX, 4) => "eax",
-            (ENC_RAX, 2) => "ax",
-            (ENC_RAX, 1) => "al",
-            (ENC_RBX, 8) => "rbx",
-            (ENC_RBX, 4) => "ebx",
-            (ENC_RBX, 2) => "bx",
-            (ENC_RBX, 1) => "bl",
-            (ENC_RCX, 8) => "rcx",
-            (ENC_RCX, 4) => "ecx",
-            (ENC_RCX, 2) => "cx",
-            (ENC_RCX, 1) => "cl",
-            (ENC_RDX, 8) => "rdx",
-            (ENC_RDX, 4) => "edx",
-            (ENC_RDX, 2) => "dx",
-            (ENC_RDX, 1) => "dl",
-            (ENC_RSI, 8) => "rsi",
-            (ENC_RSI, 4) => "esi",
-            (ENC_RSI, 2) => "si",
-            (ENC_RSI, 1) => "sil",
-            (ENC_RDI, 8) => "rdi",
-            (ENC_RDI, 4) => "edi",
-            (ENC_RDI, 2) => "di",
-            (ENC_RDI, 1) => "dil",
-            (ENC_RBP, 8) => "rbp",
-            (ENC_RBP, 4) => "ebp",
-            (ENC_RBP, 2) => "bp",
-            (ENC_RBP, 1) => "bpl",
-            (ENC_RSP, 8) => "rsp",
-            (ENC_RSP, 4) => "esp",
-            (ENC_RSP, 2) => "sp",
-            (ENC_RSP, 1) => "spl",
-            (ENC_R8, 8) => "r8",
-            (ENC_R8, 4) => "r8d",
-            (ENC_R8, 2) => "r8w",
-            (ENC_R8, 1) => "r8b",
-            (ENC_R9, 8) => "r9",
-            (ENC_R9, 4) => "r9d",
-            (ENC_R9, 2) => "r9w",
-            (ENC_R9, 1) => "r9b",
-            (ENC_R10, 8) => "r10",
-            (ENC_R10, 4) => "r10d",
-            (ENC_R10, 2) => "r10w",
-            (ENC_R10, 1) => "r10b",
-            (ENC_R11, 8) => "r11",
-            (ENC_R11, 4) => "r11d",
-            (ENC_R11, 2) => "r11w",
-            (ENC_R11, 1) => "r11b",
-            (ENC_R12, 8) => "r12",
-            (ENC_R12, 4) => "r12d",
-            (ENC_R12, 2) => "r12w",
-            (ENC_R12, 1) => "r12b",
-            (ENC_R13, 8) => "r13",
-            (ENC_R13, 4) => "r13d",
-            (ENC_R13, 2) => "r13w",
-            (ENC_R13, 1) => "r13b",
-            (ENC_R14, 8) => "r14",
-            (ENC_R14, 4) => "r14d",
-            (ENC_R14, 2) => "r14w",
-            (ENC_R14, 1) => "r14b",
-            (ENC_R15, 8) => "r15",
-            (ENC_R15, 4) => "r15d",
-            (ENC_R15, 2) => "r15w",
-            (ENC_R15, 1) => "r15b",
-            _ => panic!("Invalid Reg: {:?}", reg),
-        },
-        RegClass::Float => match reg.hw_enc() {
-            0 => "xmm0",
-            1 => "xmm1",
-            2 => "xmm2",
-            3 => "xmm3",
-            4 => "xmm4",
-            5 => "xmm5",
-            6 => "xmm6",
-            7 => "xmm7",
-            8 => "xmm8",
-            9 => "xmm9",
-            10 => "xmm10",
-            11 => "xmm11",
-            12 => "xmm12",
-            13 => "xmm13",
-            14 => "xmm14",
-            15 => "xmm15",
-            _ => panic!("Invalid Reg: {:?}", reg),
-        },
-    }
+/// Returns the callee-saved registers according to a particular calling
+/// convention.
+///
+/// This function will return the set of registers that need to be saved
+/// according to the system ABI and that are known not to be saved during the
+/// prologue emission.
+pub(crate) fn callee_saved(call_conv: &CallingConvention) -> SmallVec<[(Reg, OperandSize); 18]> {
+    use CallingConvention::*;
+    use OperandSize::*;
+    let regs: SmallVec<[_; 18]> = match call_conv {
+        SystemV => {
+            smallvec![rbx(), r12(), r13(), r14(), r15(),]
+        }
+        WindowsFastcall => {
+            smallvec![
+                rbx(),
+                rdi(),
+                rsi(),
+                r12(),
+                r13(),
+                r14(),
+                r15(),
+                xmm6(),
+                xmm7(),
+                xmm8(),
+                xmm9(),
+                xmm10(),
+                xmm11(),
+                xmm12(),
+                xmm13(),
+                xmm14(),
+                xmm15(),
+            ]
+        }
+        _ => unreachable!(),
+    };
+
+    regs.into_iter()
+        .map(|r| {
+            // The fastcall calling convention expects the entirety of the
+            // floating point registers (xmm6-xmm15) to be saved.  See
+            // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170#callercallee-saved-registers
+            if r.is_int() {
+                (r, S64)
+            } else {
+                (r, S128)
+            }
+        })
+        .collect()
 }

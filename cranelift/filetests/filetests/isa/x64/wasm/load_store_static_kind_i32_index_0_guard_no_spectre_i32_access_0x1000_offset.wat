@@ -45,7 +45,7 @@
 ;; block0:
 ;;   movl    %edi, %r8d
 ;;   cmpq    $268431356, %r8
-;;   jbe     label1; j label3
+;;   jnbe    label3; j label1
 ;; block1:
 ;;   movq    0(%rdx), %r10
 ;;   movl    %esi, 4096(%r10,%r8,1)
@@ -65,7 +65,7 @@
 ;; block0:
 ;;   movl    %edi, %r8d
 ;;   cmpq    $268431356, %r8
-;;   jbe     label1; j label3
+;;   jnbe    label3; j label1
 ;; block1:
 ;;   movq    0(%rsi), %r10
 ;;   movl    4096(%r10,%r8,1), %eax

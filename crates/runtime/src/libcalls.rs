@@ -56,14 +56,21 @@
 
 use crate::externref::VMExternRef;
 use crate::table::{Table, TableElementType};
-use crate::vmcontext::{VMCallerCheckedAnyfunc, VMContext};
-use crate::TrapReason;
+use crate::vmcontext::VMFuncRef;
+use crate::{Instance, TrapReason};
+#[cfg(feature = "wmemcheck")]
+use anyhow::bail;
 use anyhow::Result;
+use cfg_if::cfg_if;
 use std::mem;
 use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 use wasmtime_environ::{
-    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, Trap,
+    DataIndex, ElemIndex, FuncIndex, GlobalIndex, MemoryIndex, TableIndex, Trap, Unsigned,
+};
+#[cfg(feature = "wmemcheck")]
+use wasmtime_wmemcheck::AccessError::{
+    DoubleMalloc, InvalidFree, InvalidRead, InvalidWrite, OutOfBounds,
 };
 
 /// Actually public trampolines which are used by the runtime as the entrypoint
@@ -73,7 +80,8 @@ use wasmtime_environ::{
 /// now to ensure that the fp/sp on exit are recorded for backtraces to work
 /// properly.
 pub mod trampolines {
-    use crate::{TrapReason, VMContext};
+    use crate::arch::wasm_to_libcall_trampoline;
+    use crate::{Instance, TrapReason, VMContext};
 
     macro_rules! libcall {
         (
@@ -91,6 +99,7 @@ pub mod trampolines {
                 extern "C" {
                     #[allow(missing_docs)]
                     #[allow(improper_ctypes)]
+                    #[wasmtime_versioned_export_macros::versioned_link]
                     pub fn $name(
                         vmctx: *mut VMContext,
                         $( $pname: libcall!(@ty $param), )*
@@ -109,19 +118,32 @@ pub mod trampolines {
                 // the `sym` operator to get the symbol here, but other targets
                 // like s390x need to use outlined assembly files which requires
                 // `no_mangle`.
-                #[cfg_attr(target_arch = "s390x", no_mangle)]
+                #[cfg_attr(target_arch = "s390x", wasmtime_versioned_export_macros::versioned_export)]
                 unsafe extern "C" fn [<impl_ $name>](
-                    vmctx : *mut VMContext,
+                    vmctx: *mut VMContext,
                     $( $pname : libcall!(@ty $param), )*
                 ) $( -> libcall!(@ty $result))? {
-                    let result = std::panic::catch_unwind(|| {
-                        super::$name(vmctx, $($pname),*)
-                    });
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Instance::from_vmctx(vmctx, |instance| {
+                            super::$name(instance, $($pname),*)
+                        })
+                    }));
                     match result {
                         Ok(ret) => LibcallResult::convert(ret),
                         Err(panic) => crate::traphandlers::resume_panic(panic),
                     }
                 }
+
+                // This works around a `rustc` bug where compiling with LTO
+                // will sometimes strip out some of these symbols resulting
+                // in a linking failure.
+                #[allow(non_upper_case_globals)]
+                #[used]
+                static [<impl_ $name _ref>]: unsafe extern "C" fn(
+                    *mut VMContext,
+                    $( $pname : libcall!(@ty $param), )*
+                ) $( -> libcall!(@ty $result))? = [<impl_ $name>];
+
             )*
         }};
 
@@ -170,12 +192,11 @@ pub mod trampolines {
     }
 }
 
-unsafe fn memory32_grow(
-    vmctx: *mut VMContext,
+fn memory32_grow(
+    instance: &mut Instance,
     delta: u64,
     memory_index: u32,
 ) -> Result<*mut u8, TrapReason> {
-    let instance = (*vmctx).instance_mut();
     let memory_index = MemoryIndex::from_u32(memory_index);
     let result =
         match instance
@@ -191,21 +212,17 @@ unsafe fn memory32_grow(
 }
 
 // Implementation of `table.grow`.
-//
-// Table grow can invoke user code provided in a ResourceLimiter{,Async}, so we
-// need to catch a possible panic.
 unsafe fn table_grow(
-    vmctx: *mut VMContext,
+    instance: &mut Instance,
     table_index: u32,
     delta: u32,
-    // NB: we don't know whether this is a pointer to a `VMCallerCheckedAnyfunc`
+    // NB: we don't know whether this is a pointer to a `VMFuncRef`
     // or is a `VMExternRef` until we look at the table type.
     init_value: *mut u8,
 ) -> Result<u32> {
-    let instance = (*vmctx).instance_mut();
     let table_index = TableIndex::from_u32(table_index);
     let element = match instance.table_element_type(table_index) {
-        TableElementType::Func => (init_value as *mut VMCallerCheckedAnyfunc).into(),
+        TableElementType::Func => (init_value as *mut VMFuncRef).into(),
         TableElementType::Extern => {
             let init_value = if init_value.is_null() {
                 None
@@ -217,29 +234,28 @@ unsafe fn table_grow(
     };
     Ok(match instance.table_grow(table_index, delta, element)? {
         Some(r) => r,
-        None => -1_i32 as u32,
+        None => (-1_i32).unsigned(),
     })
 }
 
-use table_grow as table_grow_funcref;
+use table_grow as table_grow_func_ref;
 use table_grow as table_grow_externref;
 
 // Implementation of `table.fill`.
 unsafe fn table_fill(
-    vmctx: *mut VMContext,
+    instance: &mut Instance,
     table_index: u32,
     dst: u32,
     // NB: we don't know whether this is a `VMExternRef` or a pointer to a
-    // `VMCallerCheckedAnyfunc` until we look at the table's element type.
+    // `VMFuncRef` until we look at the table's element type.
     val: *mut u8,
     len: u32,
 ) -> Result<(), Trap> {
-    let instance = (*vmctx).instance_mut();
     let table_index = TableIndex::from_u32(table_index);
     let table = &mut *instance.get_table(table_index);
     match table.element_type() {
         TableElementType::Func => {
-            let val = val as *mut VMCallerCheckedAnyfunc;
+            let val = val as *mut VMFuncRef;
             table.fill(dst, val.into(), len)
         }
         TableElementType::Extern => {
@@ -253,12 +269,12 @@ unsafe fn table_fill(
     }
 }
 
-use table_fill as table_fill_funcref;
+use table_fill as table_fill_func_ref;
 use table_fill as table_fill_externref;
 
 // Implementation of `table.copy`.
 unsafe fn table_copy(
-    vmctx: *mut VMContext,
+    instance: &mut Instance,
     dst_table_index: u32,
     src_table_index: u32,
     dst: u32,
@@ -267,7 +283,6 @@ unsafe fn table_copy(
 ) -> Result<(), Trap> {
     let dst_table_index = TableIndex::from_u32(dst_table_index);
     let src_table_index = TableIndex::from_u32(src_table_index);
-    let instance = (*vmctx).instance_mut();
     let dst_table = instance.get_table(dst_table_index);
     // Lazy-initialize the whole range in the source table first.
     let src_range = src..(src.checked_add(len).unwrap_or(u32::MAX));
@@ -276,8 +291,8 @@ unsafe fn table_copy(
 }
 
 // Implementation of `table.init`.
-unsafe fn table_init(
-    vmctx: *mut VMContext,
+fn table_init(
+    instance: &mut Instance,
     table_index: u32,
     elem_index: u32,
     dst: u32,
@@ -286,20 +301,18 @@ unsafe fn table_init(
 ) -> Result<(), Trap> {
     let table_index = TableIndex::from_u32(table_index);
     let elem_index = ElemIndex::from_u32(elem_index);
-    let instance = (*vmctx).instance_mut();
     instance.table_init(table_index, elem_index, dst, src, len)
 }
 
 // Implementation of `elem.drop`.
-unsafe fn elem_drop(vmctx: *mut VMContext, elem_index: u32) {
+fn elem_drop(instance: &mut Instance, elem_index: u32) {
     let elem_index = ElemIndex::from_u32(elem_index);
-    let instance = (*vmctx).instance_mut();
-    instance.elem_drop(elem_index);
+    instance.elem_drop(elem_index)
 }
 
-// Implementation of `memory.copy` for locally defined memories.
-unsafe fn memory_copy(
-    vmctx: *mut VMContext,
+// Implementation of `memory.copy`.
+fn memory_copy(
+    instance: &mut Instance,
     dst_index: u32,
     dst: u64,
     src_index: u32,
@@ -308,26 +321,24 @@ unsafe fn memory_copy(
 ) -> Result<(), Trap> {
     let src_index = MemoryIndex::from_u32(src_index);
     let dst_index = MemoryIndex::from_u32(dst_index);
-    let instance = (*vmctx).instance_mut();
     instance.memory_copy(dst_index, dst, src_index, src, len)
 }
 
 // Implementation of `memory.fill` for locally defined memories.
-unsafe fn memory_fill(
-    vmctx: *mut VMContext,
+fn memory_fill(
+    instance: &mut Instance,
     memory_index: u32,
     dst: u64,
     val: u32,
     len: u64,
 ) -> Result<(), Trap> {
     let memory_index = MemoryIndex::from_u32(memory_index);
-    let instance = (*vmctx).instance_mut();
     instance.memory_fill(memory_index, dst, val as u8, len)
 }
 
 // Implementation of `memory.init`.
-unsafe fn memory_init(
-    vmctx: *mut VMContext,
+fn memory_init(
+    instance: &mut Instance,
     memory_index: u32,
     data_index: u32,
     dst: u64,
@@ -336,54 +347,50 @@ unsafe fn memory_init(
 ) -> Result<(), Trap> {
     let memory_index = MemoryIndex::from_u32(memory_index);
     let data_index = DataIndex::from_u32(data_index);
-    let instance = (*vmctx).instance_mut();
     instance.memory_init(memory_index, data_index, dst, src, len)
 }
 
 // Implementation of `ref.func`.
-unsafe fn ref_func(vmctx: *mut VMContext, func_index: u32) -> *mut u8 {
-    let instance = (*vmctx).instance_mut();
-    let anyfunc = instance
-        .get_caller_checked_anyfunc(FuncIndex::from_u32(func_index))
-        .expect("ref_func: caller_checked_anyfunc should always be available for given func index");
-    anyfunc as *mut _
+fn ref_func(instance: &mut Instance, func_index: u32) -> *mut u8 {
+    instance
+        .get_func_ref(FuncIndex::from_u32(func_index))
+        .expect("ref_func: funcref should always be available for given func index")
+        .cast()
 }
 
 // Implementation of `data.drop`.
-unsafe fn data_drop(vmctx: *mut VMContext, data_index: u32) {
+fn data_drop(instance: &mut Instance, data_index: u32) {
     let data_index = DataIndex::from_u32(data_index);
-    let instance = (*vmctx).instance_mut();
     instance.data_drop(data_index)
 }
 
 // Returns a table entry after lazily initializing it.
-unsafe fn table_get_lazy_init_funcref(
-    vmctx: *mut VMContext,
+unsafe fn table_get_lazy_init_func_ref(
+    instance: &mut Instance,
     table_index: u32,
     index: u32,
 ) -> *mut u8 {
-    let instance = (*vmctx).instance_mut();
     let table_index = TableIndex::from_u32(table_index);
     let table = instance.get_table_with_lazy_init(table_index, std::iter::once(index));
     let elem = (*table)
         .get(index)
         .expect("table access already bounds-checked");
 
-    elem.into_ref_asserting_initialized() as *mut _
+    elem.into_ref_asserting_initialized()
 }
 
 // Drop a `VMExternRef`.
-unsafe fn drop_externref(_vmctx: *mut VMContext, externref: *mut u8) {
+unsafe fn drop_externref(_instance: &mut Instance, externref: *mut u8) {
     let externref = externref as *mut crate::externref::VMExternData;
-    let externref = NonNull::new(externref).unwrap();
+    let externref = NonNull::new(externref).unwrap().into();
     crate::externref::VMExternData::drop_and_dealloc(externref);
 }
 
 // Do a GC and insert the given `externref` into the
 // `VMExternRefActivationsTable`.
-unsafe fn activations_table_insert_with_gc(vmctx: *mut VMContext, externref: *mut u8) {
+unsafe fn activations_table_insert_with_gc(instance: &mut Instance, externref: *mut u8) {
     let externref = VMExternRef::clone_from_raw(externref);
-    let instance = (*vmctx).instance();
+    let limits = *instance.runtime_limits();
     let (activations_table, module_info_lookup) = (*instance.store()).externref_activations_table();
 
     // Invariant: all `externref`s on the stack have an entry in the activations
@@ -395,13 +402,13 @@ unsafe fn activations_table_insert_with_gc(vmctx: *mut VMContext, externref: *mu
     // but it isn't really a concern because this is already a slow path.
     activations_table.insert_without_gc(externref.clone());
 
-    activations_table.insert_with_gc(externref, module_info_lookup);
+    activations_table.insert_with_gc(limits, externref, module_info_lookup);
 }
 
 // Perform a Wasm `global.get` for `externref` globals.
-unsafe fn externref_global_get(vmctx: *mut VMContext, index: u32) -> *mut u8 {
+unsafe fn externref_global_get(instance: &mut Instance, index: u32) -> *mut u8 {
     let index = GlobalIndex::from_u32(index);
-    let instance = (*vmctx).instance();
+    let limits = *instance.runtime_limits();
     let global = instance.defined_or_imported_global_ptr(index);
     match (*global).as_externref().clone() {
         None => ptr::null_mut(),
@@ -409,14 +416,14 @@ unsafe fn externref_global_get(vmctx: *mut VMContext, index: u32) -> *mut u8 {
             let raw = externref.as_raw();
             let (activations_table, module_info_lookup) =
                 (*instance.store()).externref_activations_table();
-            activations_table.insert_with_gc(externref, module_info_lookup);
+            activations_table.insert_with_gc(limits, externref, module_info_lookup);
             raw
         }
     }
 }
 
 // Perform a Wasm `global.set` for `externref` globals.
-unsafe fn externref_global_set(vmctx: *mut VMContext, index: u32, externref: *mut u8) {
+unsafe fn externref_global_set(instance: &mut Instance, index: u32, externref: *mut u8) {
     let externref = if externref.is_null() {
         None
     } else {
@@ -424,7 +431,6 @@ unsafe fn externref_global_set(vmctx: *mut VMContext, index: u32, externref: *mu
     };
 
     let index = GlobalIndex::from_u32(index);
-    let instance = (*vmctx).instance();
     let global = instance.defined_or_imported_global_ptr(index);
 
     // Swap the new `externref` value into the global before we drop the old
@@ -436,22 +442,21 @@ unsafe fn externref_global_set(vmctx: *mut VMContext, index: u32, externref: *mu
 }
 
 // Implementation of `memory.atomic.notify` for locally defined memories.
-unsafe fn memory_atomic_notify(
-    vmctx: *mut VMContext,
+fn memory_atomic_notify(
+    instance: &mut Instance,
     memory_index: u32,
     addr_index: u64,
     count: u32,
 ) -> Result<u32, Trap> {
     let memory = MemoryIndex::from_u32(memory_index);
-    let instance = (*vmctx).instance_mut();
     instance
         .get_runtime_memory(memory)
         .atomic_notify(addr_index, count)
 }
 
 // Implementation of `memory.atomic.wait32` for locally defined memories.
-unsafe fn memory_atomic_wait32(
-    vmctx: *mut VMContext,
+fn memory_atomic_wait32(
+    instance: &mut Instance,
     memory_index: u32,
     addr_index: u64,
     expected: u32,
@@ -460,15 +465,14 @@ unsafe fn memory_atomic_wait32(
     // convert timeout to Instant, before any wait happens on locking
     let timeout = (timeout as i64 >= 0).then(|| Instant::now() + Duration::from_nanos(timeout));
     let memory = MemoryIndex::from_u32(memory_index);
-    let instance = (*vmctx).instance_mut();
     Ok(instance
         .get_runtime_memory(memory)
         .atomic_wait32(addr_index, expected, timeout)? as u32)
 }
 
 // Implementation of `memory.atomic.wait64` for locally defined memories.
-unsafe fn memory_atomic_wait64(
-    vmctx: *mut VMContext,
+fn memory_atomic_wait64(
+    instance: &mut Instance,
     memory_index: u32,
     addr_index: u64,
     expected: u64,
@@ -477,18 +481,296 @@ unsafe fn memory_atomic_wait64(
     // convert timeout to Instant, before any wait happens on locking
     let timeout = (timeout as i64 >= 0).then(|| Instant::now() + Duration::from_nanos(timeout));
     let memory = MemoryIndex::from_u32(memory_index);
-    let instance = (*vmctx).instance_mut();
     Ok(instance
         .get_runtime_memory(memory)
         .atomic_wait64(addr_index, expected, timeout)? as u32)
 }
 
 // Hook for when an instance runs out of fuel.
-unsafe fn out_of_gas(vmctx: *mut VMContext) -> Result<()> {
-    (*(*vmctx).instance().store()).out_of_gas()
+unsafe fn out_of_gas(instance: &mut Instance) -> Result<()> {
+    (*instance.store()).out_of_gas()
 }
 
 // Hook for when an instance observes that the epoch has changed.
-unsafe fn new_epoch(vmctx: *mut VMContext) -> Result<u64> {
-    (*(*vmctx).instance().store()).new_epoch()
+unsafe fn new_epoch(instance: &mut Instance) -> Result<u64> {
+    (*instance.store()).new_epoch()
+}
+
+cfg_if! {
+    if #[cfg(feature = "wmemcheck")] {
+        // Hook for validating malloc using wmemcheck_state.
+        unsafe fn check_malloc(instance: &mut Instance, addr: u32, len: u32) -> Result<u32> {
+            if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+                let result = wmemcheck_state.malloc(addr as usize, len as usize);
+                wmemcheck_state.memcheck_on();
+                match result {
+                    Ok(()) => {
+                        return Ok(0);
+                    }
+                    Err(DoubleMalloc { addr, len }) => {
+                        bail!("Double malloc at addr {:#x} of size {}", addr, len)
+                    }
+                    Err(OutOfBounds { addr, len }) => {
+                        bail!("Malloc out of bounds at addr {:#x} of size {}", addr, len);
+                    }
+                    _ => {
+                        panic!("unreachable")
+                    }
+                }
+            }
+            Ok(0)
+        }
+
+        // Hook for validating free using wmemcheck_state.
+        unsafe fn check_free(instance: &mut Instance, addr: u32) -> Result<u32> {
+            if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+                let result = wmemcheck_state.free(addr as usize);
+                wmemcheck_state.memcheck_on();
+                match result {
+                    Ok(()) => {
+                        return Ok(0);
+                    }
+                    Err(InvalidFree { addr }) => {
+                        bail!("Invalid free at addr {:#x}", addr)
+                    }
+                    _ => {
+                        panic!("unreachable")
+                    }
+                }
+            }
+            Ok(0)
+        }
+
+        // Hook for validating load using wmemcheck_state.
+        fn check_load(instance: &mut Instance, num_bytes: u32, addr: u32, offset: u32) -> Result<u32> {
+            if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+                let result = wmemcheck_state.read(addr as usize + offset as usize, num_bytes as usize);
+                match result {
+                    Ok(()) => {
+                        return Ok(0);
+                    }
+                    Err(InvalidRead { addr, len }) => {
+                        bail!("Invalid load at addr {:#x} of size {}", addr, len);
+                    }
+                    Err(OutOfBounds { addr, len }) => {
+                        bail!("Load out of bounds at addr {:#x} of size {}", addr, len);
+                    }
+                    _ => {
+                        panic!("unreachable")
+                    }
+                }
+            }
+            Ok(0)
+        }
+
+        // Hook for validating store using wmemcheck_state.
+        fn check_store(instance: &mut Instance, num_bytes: u32, addr: u32, offset: u32) -> Result<u32> {
+            if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+                let result = wmemcheck_state.write(addr as usize + offset as usize, num_bytes as usize);
+                match result {
+                    Ok(()) => {
+                        return Ok(0);
+                    }
+                    Err(InvalidWrite { addr, len }) => {
+                        bail!("Invalid store at addr {:#x} of size {}", addr, len)
+                    }
+                    Err(OutOfBounds { addr, len }) => {
+                        bail!("Store out of bounds at addr {:#x} of size {}", addr, len)
+                    }
+                    _ => {
+                        panic!("unreachable")
+                    }
+                }
+            }
+            Ok(0)
+        }
+
+        // Hook for turning wmemcheck load/store validation off when entering a malloc function.
+        fn malloc_start(instance: &mut Instance) {
+            if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+                wmemcheck_state.memcheck_off();
+            }
+        }
+
+        // Hook for turning wmemcheck load/store validation off when entering a free function.
+        fn free_start(instance: &mut Instance) {
+            if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+                wmemcheck_state.memcheck_off();
+            }
+        }
+
+        // Hook for tracking wasm stack updates using wmemcheck_state.
+        fn update_stack_pointer(_instance: &mut Instance, _value: u32) {
+            // TODO: stack-tracing has yet to be finalized. All memory below
+            // the address of the top of the stack is marked as valid for
+            // loads and stores.
+            // if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+            //     instance.wmemcheck_state.update_stack_pointer(value as usize);
+            // }
+        }
+
+        // Hook updating wmemcheck_state memory state vector every time memory.grow is called.
+        fn update_mem_size(instance: &mut Instance, num_pages: u32) {
+            if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
+                const KIB: usize = 1024;
+                let num_bytes = num_pages as usize * 64 * KIB;
+                wmemcheck_state.update_mem_size(num_bytes);
+            }
+        }
+    } else {
+        // No-op for all wmemcheck hooks.
+        unsafe fn check_malloc(_instance: &mut Instance, _addr: u32, _len: u32) -> Result<u32> { Ok(0) }
+
+        unsafe fn check_free(_instance: &mut Instance, _addr: u32) -> Result<u32> { Ok(0) }
+
+        fn check_load(_instance: &mut Instance, _num_bytes: u32, _addr: u32, _offset: u32) -> Result<u32> { Ok(0) }
+
+        fn check_store(_instance: &mut Instance, _num_bytes: u32, _addr: u32, _offset: u32) -> Result<u32> { Ok(0) }
+
+        fn malloc_start(_instance: &mut Instance) {}
+
+        fn free_start(_instance: &mut Instance) {}
+
+        fn update_stack_pointer(_instance: &mut Instance, _value: u32) {}
+
+        fn update_mem_size(_instance: &mut Instance, _num_pages: u32) {}
+    }
+}
+
+/// This module contains functions which are used for resolving relocations at
+/// runtime if necessary.
+///
+/// These functions are not used by default and currently the only platform
+/// they're used for is on x86_64 when SIMD is disabled and then SSE features
+/// are further disabled. In these configurations Cranelift isn't allowed to use
+/// native CPU instructions so it falls back to libcalls and we rely on the Rust
+/// standard library generally for implementing these.
+#[allow(missing_docs)]
+pub mod relocs {
+    pub extern "C" fn floorf32(f: f32) -> f32 {
+        f.floor()
+    }
+
+    pub extern "C" fn floorf64(f: f64) -> f64 {
+        f.floor()
+    }
+
+    pub extern "C" fn ceilf32(f: f32) -> f32 {
+        f.ceil()
+    }
+
+    pub extern "C" fn ceilf64(f: f64) -> f64 {
+        f.ceil()
+    }
+
+    pub extern "C" fn truncf32(f: f32) -> f32 {
+        f.trunc()
+    }
+
+    pub extern "C" fn truncf64(f: f64) -> f64 {
+        f.trunc()
+    }
+
+    const TOINT_32: f32 = 1.0 / f32::EPSILON;
+    const TOINT_64: f64 = 1.0 / f64::EPSILON;
+
+    // NB: replace with `round_ties_even` from libstd when it's stable as
+    // tracked by rust-lang/rust#96710
+    pub extern "C" fn nearestf32(x: f32) -> f32 {
+        // Rust doesn't have a nearest function; there's nearbyint, but it's not
+        // stabilized, so do it manually.
+        // Nearest is either ceil or floor depending on which is nearest or even.
+        // This approach exploited round half to even default mode.
+        let i = x.to_bits();
+        let e = i >> 23 & 0xff;
+        if e >= 0x7f_u32 + 23 {
+            // Check for NaNs.
+            if e == 0xff {
+                // Read the 23-bits significand.
+                if i & 0x7fffff != 0 {
+                    // Ensure it's arithmetic by setting the significand's most
+                    // significant bit to 1; it also works for canonical NaNs.
+                    return f32::from_bits(i | (1 << 22));
+                }
+            }
+            x
+        } else {
+            (x.abs() + TOINT_32 - TOINT_32).copysign(x)
+        }
+    }
+
+    pub extern "C" fn nearestf64(x: f64) -> f64 {
+        let i = x.to_bits();
+        let e = i >> 52 & 0x7ff;
+        if e >= 0x3ff_u64 + 52 {
+            // Check for NaNs.
+            if e == 0x7ff {
+                // Read the 52-bits significand.
+                if i & 0xfffffffffffff != 0 {
+                    // Ensure it's arithmetic by setting the significand's most
+                    // significant bit to 1; it also works for canonical NaNs.
+                    return f64::from_bits(i | (1 << 51));
+                }
+            }
+            x
+        } else {
+            (x.abs() + TOINT_64 - TOINT_64).copysign(x)
+        }
+    }
+
+    pub extern "C" fn fmaf32(a: f32, b: f32, c: f32) -> f32 {
+        a.mul_add(b, c)
+    }
+
+    pub extern "C" fn fmaf64(a: f64, b: f64, c: f64) -> f64 {
+        a.mul_add(b, c)
+    }
+
+    // This intrinsic is only used on x86_64 platforms as an implementation of
+    // the `pshufb` instruction when SSSE3 is not available.
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::__m128i;
+    #[cfg(target_arch = "x86_64")]
+    #[allow(improper_ctypes_definitions)]
+    pub extern "C" fn x86_pshufb(a: __m128i, b: __m128i) -> __m128i {
+        union U {
+            reg: __m128i,
+            mem: [u8; 16],
+        }
+
+        unsafe {
+            let a = U { reg: a }.mem;
+            let b = U { reg: b }.mem;
+
+            let select = |arr: &[u8; 16], byte: u8| {
+                if byte & 0x80 != 0 {
+                    0x00
+                } else {
+                    arr[(byte & 0xf) as usize]
+                }
+            };
+
+            U {
+                mem: [
+                    select(&a, b[0]),
+                    select(&a, b[1]),
+                    select(&a, b[2]),
+                    select(&a, b[3]),
+                    select(&a, b[4]),
+                    select(&a, b[5]),
+                    select(&a, b[6]),
+                    select(&a, b[7]),
+                    select(&a, b[8]),
+                    select(&a, b[9]),
+                    select(&a, b[10]),
+                    select(&a, b[11]),
+                    select(&a, b[12]),
+                    select(&a, b[13]),
+                    select(&a, b[14]),
+                    select(&a, b[15]),
+                ],
+            }
+            .reg
+        }
+    }
 }

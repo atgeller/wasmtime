@@ -1,17 +1,3 @@
-#![deny(trivial_numeric_casts)]
-#![warn(unused_import_braces, unstable_features, unused_extern_crates)]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    warn(
-        clippy::float_arithmetic,
-        clippy::mut_mut,
-        clippy::nonminimal_bool,
-        clippy::map_unwrap_or,
-        clippy::clippy::unicode_not_nfc,
-        clippy::use_self
-    )
-)]
-
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -57,15 +43,15 @@ enum Commands {
 #[derive(Parser)]
 struct TestOptions {
     /// Be more verbose
-    #[clap(short, long)]
+    #[arg(short, long)]
     verbose: bool,
 
     /// Print pass timing report for test
-    #[clap(short = 'T')]
+    #[arg(short = 'T')]
     time_passes: bool,
 
     /// Specify an input file to be used. Use '-' for stdin.
-    #[clap(required = true)]
+    #[arg(required = true)]
     files: Vec<PathBuf>,
 }
 
@@ -73,11 +59,11 @@ struct TestOptions {
 #[derive(Parser)]
 struct PassOptions {
     /// Be more verbose
-    #[clap(short, long)]
+    #[arg(short, long)]
     verbose: bool,
 
     /// Print pass timing report for test
-    #[clap(short = 'T')]
+    #[arg(short = 'T')]
     time_passes: bool,
 
     /// Specify an input file to be used. Use '-' for stdin.
@@ -87,7 +73,7 @@ struct PassOptions {
     target: String,
 
     /// Specify pass(es) to be run on the input file
-    #[clap(required = true)]
+    #[arg(required = true)]
     passes: Vec<String>,
 }
 
@@ -141,4 +127,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[test]
+fn verify_cli() {
+    use clap::CommandFactory;
+    Commands::command().debug_assert()
 }

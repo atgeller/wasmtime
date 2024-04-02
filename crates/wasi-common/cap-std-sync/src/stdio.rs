@@ -1,12 +1,8 @@
 use crate::file::convert_systimespec;
 use fs_set_times::SetTimes;
-use io_lifetimes::AsFilelike;
-use is_terminal::IsTerminal;
 use std::any::Any;
 use std::convert::TryInto;
-use std::fs::File;
-use std::io;
-use std::io::{Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use system_interface::io::ReadReady;
 
 #[cfg(windows)]
@@ -31,6 +27,7 @@ impl WasiFile for Stdin {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
     #[cfg(unix)]
     fn pollable(&self) -> Option<rustix::fd::BorrowedFd> {
         Some(self.0.as_fd())
@@ -40,32 +37,33 @@ impl WasiFile for Stdin {
     fn pollable(&self) -> Option<io_extras::os::windows::RawHandleOrSocket> {
         Some(self.0.as_raw_handle_or_socket())
     }
-    async fn get_filetype(&mut self) -> Result<FileType, Error> {
+
+    async fn get_filetype(&self) -> Result<FileType, Error> {
         if self.isatty() {
             Ok(FileType::CharacterDevice)
         } else {
             Ok(FileType::Unknown)
         }
     }
-    async fn read_vectored<'a>(&mut self, bufs: &mut [io::IoSliceMut<'a>]) -> Result<u64, Error> {
-        let n = (&*self.0.as_filelike_view::<File>()).read_vectored(bufs)?;
+    async fn read_vectored<'a>(&self, bufs: &mut [io::IoSliceMut<'a>]) -> Result<u64, Error> {
+        let n = self.0.lock().read_vectored(bufs)?;
         Ok(n.try_into().map_err(|_| Error::range())?)
     }
     async fn read_vectored_at<'a>(
-        &mut self,
+        &self,
         _bufs: &mut [io::IoSliceMut<'a>],
         _offset: u64,
     ) -> Result<u64, Error> {
         Err(Error::seek_pipe())
     }
-    async fn seek(&mut self, _pos: std::io::SeekFrom) -> Result<u64, Error> {
+    async fn seek(&self, _pos: std::io::SeekFrom) -> Result<u64, Error> {
         Err(Error::seek_pipe())
     }
-    async fn peek(&mut self, _buf: &mut [u8]) -> Result<u64, Error> {
+    async fn peek(&self, _buf: &mut [u8]) -> Result<u64, Error> {
         Err(Error::seek_pipe())
     }
     async fn set_times(
-        &mut self,
+        &self,
         atime: Option<wasi_common::SystemTimeSpec>,
         mtime: Option<wasi_common::SystemTimeSpec>,
     ) -> Result<(), Error> {
@@ -73,11 +71,14 @@ impl WasiFile for Stdin {
             .set_times(convert_systimespec(atime), convert_systimespec(mtime))?;
         Ok(())
     }
-    async fn num_ready_bytes(&self) -> Result<u64, Error> {
+    fn num_ready_bytes(&self) -> Result<u64, Error> {
         Ok(self.0.num_ready_bytes()?)
     }
-    fn isatty(&mut self) -> bool {
-        self.0.is_terminal()
+    fn isatty(&self) -> bool {
+        #[cfg(unix)]
+        return self.0.as_fd().is_terminal();
+        #[cfg(windows)]
+        return self.0.as_handle().is_terminal();
     }
 }
 #[cfg(windows)]
@@ -111,39 +112,43 @@ macro_rules! wasi_file_write_impl {
             fn pollable(&self) -> Option<rustix::fd::BorrowedFd> {
                 Some(self.0.as_fd())
             }
-
             #[cfg(windows)]
             fn pollable(&self) -> Option<io_extras::os::windows::RawHandleOrSocket> {
                 Some(self.0.as_raw_handle_or_socket())
             }
-            async fn get_filetype(&mut self) -> Result<FileType, Error> {
+            async fn get_filetype(&self) -> Result<FileType, Error> {
                 if self.isatty() {
                     Ok(FileType::CharacterDevice)
                 } else {
                     Ok(FileType::Unknown)
                 }
             }
-            async fn get_fdflags(&mut self) -> Result<FdFlags, Error> {
+            async fn get_fdflags(&self) -> Result<FdFlags, Error> {
                 Ok(FdFlags::APPEND)
             }
-            async fn write_vectored<'a>(&mut self, bufs: &[io::IoSlice<'a>]) -> Result<u64, Error> {
-                let n = (&*self.0.as_filelike_view::<File>()).write_vectored(bufs)?;
+            async fn write_vectored<'a>(&self, bufs: &[io::IoSlice<'a>]) -> Result<u64, Error> {
+                let mut io = self.0.lock();
+                let n = io.write_vectored(bufs)?;
+                // On a successful write additionally flush out the bytes to
+                // handle stdio buffering done by libstd since WASI interfaces
+                // here aren't buffered.
+                io.flush()?;
                 Ok(n.try_into().map_err(|_| {
                     Error::range().context("converting write_vectored total length")
                 })?)
             }
             async fn write_vectored_at<'a>(
-                &mut self,
+                &self,
                 _bufs: &[io::IoSlice<'a>],
                 _offset: u64,
             ) -> Result<u64, Error> {
                 Err(Error::seek_pipe())
             }
-            async fn seek(&mut self, _pos: std::io::SeekFrom) -> Result<u64, Error> {
+            async fn seek(&self, _pos: std::io::SeekFrom) -> Result<u64, Error> {
                 Err(Error::seek_pipe())
             }
             async fn set_times(
-                &mut self,
+                &self,
                 atime: Option<wasi_common::SystemTimeSpec>,
                 mtime: Option<wasi_common::SystemTimeSpec>,
             ) -> Result<(), Error> {
@@ -151,7 +156,7 @@ macro_rules! wasi_file_write_impl {
                     .set_times(convert_systimespec(atime), convert_systimespec(mtime))?;
                 Ok(())
             }
-            fn isatty(&mut self) -> bool {
+            fn isatty(&self) -> bool {
                 self.0.is_terminal()
             }
         }

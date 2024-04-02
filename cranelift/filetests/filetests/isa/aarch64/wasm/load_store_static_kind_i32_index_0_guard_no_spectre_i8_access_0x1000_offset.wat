@@ -43,7 +43,7 @@
 ;;   movz w9, #61439
 ;;   movk w9, w9, #4095, LSL #16
 ;;   subs xzr, x8, x9
-;;   b.ls label1 ; b label3
+;;   b.hi label3 ; b label1
 ;; block1:
 ;;   ldr x10, [x2]
 ;;   add x10, x10, #4096
@@ -60,7 +60,7 @@
 ;;   movz w9, #61439
 ;;   movk w9, w9, #4095, LSL #16
 ;;   subs xzr, x8, x9
-;;   b.ls label1 ; b label3
+;;   b.hi label3 ; b label1
 ;; block1:
 ;;   ldr x10, [x1]
 ;;   add x9, x10, #4096

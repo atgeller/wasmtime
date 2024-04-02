@@ -47,7 +47,7 @@
 ;; block0:
 ;;   movq    8(%rdx), %r8
 ;;   cmpq    %r8, %rdi
-;;   jb      label1; j label3
+;;   jnb     label3; j label1
 ;; block1:
 ;;   movq    0(%rdx), %r10
 ;;   movb    %sil, 0(%r10,%rdi,1)
@@ -67,7 +67,7 @@
 ;; block0:
 ;;   movq    8(%rsi), %r8
 ;;   cmpq    %r8, %rdi
-;;   jb      label1; j label3
+;;   jnb     label3; j label1
 ;; block1:
 ;;   movq    0(%rsi), %r10
 ;;   movzbq  0(%r10,%rdi,1), %rax

@@ -16,10 +16,10 @@ use crate::machinst::isle::*;
 use crate::machinst::{MachLabel, Reg};
 use crate::{
     ir::{
-        condcodes::*, immediates::*, types::*, ArgumentPurpose, AtomicRmwOp, Endianness, Inst,
-        InstructionData, KnownSymbol, LibCall, MemFlags, Opcode, TrapCode, Value, ValueList,
+        condcodes::*, immediates::*, types::*, ArgumentExtension, ArgumentPurpose, AtomicRmwOp,
+        BlockCall, Endianness, Inst, InstructionData, KnownSymbol, LibCall, MemFlags, Opcode,
+        TrapCode, Value, ValueList,
     },
-    isa::unwind::UnwindInst,
     isa::CallConv,
     machinst::abi::ABIMachineSpec,
     machinst::{
@@ -80,6 +80,27 @@ pub(crate) fn lower_branch(
 
 impl generated_code::Context for IsleContext<'_, '_, MInst, S390xBackend> {
     isle_lower_prelude_methods!();
+
+    fn gen_return_call(
+        &mut self,
+        callee_sig: SigRef,
+        callee: ExternalName,
+        distance: RelocDistance,
+        args: ValueSlice,
+    ) -> InstOutput {
+        let _ = (callee_sig, callee, distance, args);
+        todo!()
+    }
+
+    fn gen_return_call_indirect(
+        &mut self,
+        callee_sig: SigRef,
+        callee: Value,
+        args: ValueSlice,
+    ) -> InstOutput {
+        let _ = (callee_sig, callee, args);
+        todo!()
+    }
 
     #[inline]
     fn args_builder_new(&mut self) -> CallArgListBuilder {
@@ -292,15 +313,6 @@ impl generated_code::Context for IsleContext<'_, '_, MInst, S390xBackend> {
     }
 
     #[inline]
-    fn allow_div_traps(&mut self, _: Type) -> Option<()> {
-        if !self.backend.flags.avoid_div_traps() {
-            Some(())
-        } else {
-            None
-        }
-    }
-
-    #[inline]
     fn mie2_enabled(&mut self, _: Type) -> Option<()> {
         if self.backend.isa_flags.has_mie2() {
             Some(())
@@ -436,7 +448,7 @@ impl generated_code::Context for IsleContext<'_, '_, MInst, S390xBackend> {
     }
 
     #[inline]
-    fn u64_as_u32(&mut self, n: u64) -> u32 {
+    fn u64_truncate_to_u32(&mut self, n: u64) -> u32 {
         n as u32
     }
 
@@ -628,21 +640,21 @@ impl generated_code::Context for IsleContext<'_, '_, MInst, S390xBackend> {
     #[inline]
     fn i64_from_negated_value(&mut self, val: Value) -> Option<i64> {
         let constant = self.u64_from_signed_value(val)? as i64;
-        let imm = -constant;
+        let imm = constant.wrapping_neg();
         Some(imm)
     }
 
     #[inline]
     fn i32_from_negated_value(&mut self, val: Value) -> Option<i32> {
         let constant = self.u64_from_signed_value(val)? as i64;
-        let imm = i32::try_from(-constant).ok()?;
+        let imm = i32::try_from(constant.wrapping_neg()).ok()?;
         Some(imm)
     }
 
     #[inline]
     fn i16_from_negated_value(&mut self, val: Value) -> Option<i16> {
         let constant = self.u64_from_signed_value(val)? as i64;
-        let imm = i16::try_from(-constant).ok()?;
+        let imm = i16::try_from(constant.wrapping_neg()).ok()?;
         Some(imm)
     }
 
@@ -723,16 +735,6 @@ impl generated_code::Context for IsleContext<'_, '_, MInst, S390xBackend> {
         } else {
             None
         }
-    }
-
-    #[inline]
-    fn vec_length_minus1(&mut self, vec: &VecMachLabel) -> u32 {
-        u32::try_from(vec.len()).unwrap() - 1
-    }
-
-    #[inline]
-    fn vec_element(&mut self, vec: &VecMachLabel, index: u8) -> MachLabel {
-        vec[usize::from(index)]
     }
 
     #[inline]
@@ -977,7 +979,7 @@ impl generated_code::Context for IsleContext<'_, '_, MInst, S390xBackend> {
 /// Lane order to be used for a given calling convention.
 #[inline]
 fn lane_order_for_call_conv(call_conv: CallConv) -> LaneOrder {
-    if call_conv.extends_wasmtime() {
+    if call_conv == CallConv::WasmtimeSystemV {
         LaneOrder::LittleEndian
     } else {
         LaneOrder::BigEndian

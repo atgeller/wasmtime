@@ -7,6 +7,7 @@ block0(v0: f32):
   return v1
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
@@ -16,6 +17,18 @@ block0(v0: f32):
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movl $0x7fffffff, %eax
+;   movd %eax, %xmm4
+;   andps %xmm4, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
 
 function %f2(f64) -> f64 {
 block0(v0: f64):
@@ -23,6 +36,7 @@ block0(v0: f64):
   return v1
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
@@ -32,6 +46,18 @@ block0(v0: f64):
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movabsq $0x7fffffffffffffff, %rax
+;   movq %rax, %xmm4
+;   andpd %xmm4, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
 
 function %f3(f32x4) -> f32x4 {
 block0(v0: f32x4):
@@ -39,15 +65,29 @@ block0(v0: f32x4):
   return v1
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
-;   pcmpeqd %xmm3, %xmm3, %xmm3
-;   psrld   %xmm3, $1, %xmm3
-;   andps   %xmm0, %xmm3, %xmm0
+;   uninit  %xmm4
+;   pcmpeqd %xmm4, %xmm4, %xmm4
+;   psrld   %xmm4, $1, %xmm4
+;   andps   %xmm0, %xmm4, %xmm0
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   pcmpeqd %xmm4, %xmm4
+;   psrld $1, %xmm4
+;   andps %xmm4, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
 
 function %f4(f64x2) -> f64x2 {
 block0(v0: f64x2):
@@ -55,13 +95,27 @@ block0(v0: f64x2):
   return v1
 }
 
+; VCode:
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
-;   pcmpeqd %xmm3, %xmm3, %xmm3
-;   psrlq   %xmm3, $1, %xmm3
-;   andpd   %xmm0, %xmm3, %xmm0
+;   uninit  %xmm4
+;   pcmpeqd %xmm4, %xmm4, %xmm4
+;   psrlq   %xmm4, $1, %xmm4
+;   andpd   %xmm0, %xmm4, %xmm0
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   pcmpeqd %xmm4, %xmm4
+;   psrlq $1, %xmm4
+;   andpd %xmm4, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
 

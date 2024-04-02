@@ -56,40 +56,41 @@ fn link_twice_bad() -> Result<()> {
     // globals
     let ty = GlobalType::new(ValType::I32, Mutability::Const);
     let global = Global::new(&mut store, ty, Val::I32(0))?;
-    linker.define("g", "1", global.clone())?;
-    assert!(linker.define("g", "1", global.clone()).is_err());
+    linker.define(&mut store, "g", "1", global.clone())?;
+    assert!(linker.define(&mut store, "g", "1", global.clone()).is_err());
 
     let ty = GlobalType::new(ValType::I32, Mutability::Var);
     let global = Global::new(&mut store, ty, Val::I32(0))?;
-    linker.define("g", "2", global.clone())?;
-    assert!(linker.define("g", "2", global.clone()).is_err());
+    linker.define(&mut store, "g", "2", global.clone())?;
+    assert!(linker.define(&mut store, "g", "2", global.clone()).is_err());
 
     let ty = GlobalType::new(ValType::I64, Mutability::Const);
     let global = Global::new(&mut store, ty, Val::I64(0))?;
-    linker.define("g", "3", global.clone())?;
-    assert!(linker.define("g", "3", global.clone()).is_err());
+    linker.define(&mut store, "g", "3", global.clone())?;
+    assert!(linker.define(&mut store, "g", "3", global.clone()).is_err());
 
     // memories
     let ty = MemoryType::new(1, None);
     let memory = Memory::new(&mut store, ty)?;
-    linker.define("m", "", memory.clone())?;
-    assert!(linker.define("m", "", memory.clone()).is_err());
+    linker.define(&mut store, "m", "", memory.clone())?;
+    assert!(linker.define(&mut store, "m", "", memory.clone()).is_err());
     let ty = MemoryType::new(2, None);
     let memory = Memory::new(&mut store, ty)?;
-    assert!(linker.define("m", "", memory.clone()).is_err());
+    assert!(linker.define(&mut store, "m", "", memory.clone()).is_err());
 
     // tables
     let ty = TableType::new(ValType::FuncRef, 1, None);
     let table = Table::new(&mut store, ty, Val::FuncRef(None))?;
-    linker.define("t", "", table.clone())?;
-    assert!(linker.define("t", "", table.clone()).is_err());
+    linker.define(&mut store, "t", "", table.clone())?;
+    assert!(linker.define(&mut store, "t", "", table.clone()).is_err());
     let ty = TableType::new(ValType::FuncRef, 2, None);
     let table = Table::new(&mut store, ty, Val::FuncRef(None))?;
-    assert!(linker.define("t", "", table.clone()).is_err());
+    assert!(linker.define(&mut store, "t", "", table.clone()).is_err());
     Ok(())
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn function_interposition() -> Result<()> {
     let mut store = Store::<()>::default();
     let mut linker = Linker::new(store.engine());
@@ -100,11 +101,8 @@ fn function_interposition() -> Result<()> {
     )?;
     for _ in 0..4 {
         let instance = linker.instantiate(&mut store, &module)?;
-        linker.define(
-            "red",
-            "green",
-            instance.get_export(&mut store, "green").unwrap().clone(),
-        )?;
+        let green = instance.get_export(&mut store, "green").unwrap().clone();
+        linker.define(&mut store, "red", "green", green)?;
         module = Module::new(
             store.engine(),
             r#"(module
@@ -127,6 +125,7 @@ fn function_interposition() -> Result<()> {
 // Same as `function_interposition`, but the linker's name for the function
 // differs from the module's name.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn function_interposition_renamed() -> Result<()> {
     let mut store = Store::<()>::default();
     let mut linker = Linker::new(store.engine());
@@ -137,11 +136,8 @@ fn function_interposition_renamed() -> Result<()> {
     )?;
     for _ in 0..4 {
         let instance = linker.instantiate(&mut store, &module)?;
-        linker.define(
-            "red",
-            "green",
-            instance.get_export(&mut store, "export").unwrap().clone(),
-        )?;
+        let export = instance.get_export(&mut store, "export").unwrap().clone();
+        linker.define(&mut store, "red", "green", export)?;
         module = Module::new(
             store.engine(),
             r#"(module
@@ -160,6 +156,7 @@ fn function_interposition_renamed() -> Result<()> {
 // Similar to `function_interposition`, but use `Linker::instance` instead of
 // `Linker::define`.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn module_interposition() -> Result<()> {
     let mut store = Store::<()>::default();
     let mut linker = Linker::new(store.engine());
@@ -191,6 +188,7 @@ fn module_interposition() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn allow_unknown_exports() -> Result<()> {
     let mut store = Store::<()>::default();
     let mut linker = Linker::new(store.engine());
@@ -209,6 +207,7 @@ fn allow_unknown_exports() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn no_leak() -> Result<()> {
     struct DropMe(Rc<Cell<bool>>);
 
@@ -237,6 +236,7 @@ fn no_leak() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn no_leak_with_imports() -> Result<()> {
     struct DropMe(Arc<AtomicUsize>);
 
@@ -251,7 +251,9 @@ fn no_leak_with_imports() -> Result<()> {
         let mut store = Store::new(&Engine::default(), DropMe(flag.clone()));
         let mut linker = Linker::new(store.engine());
         let drop_me = DropMe(flag.clone());
-        linker.func_wrap("", "", move || drop(&drop_me))?;
+        linker.func_wrap("", "", move || {
+            let _ = &drop_me;
+        })?;
         let module = Module::new(
             store.engine(),
             r#"
@@ -296,7 +298,9 @@ fn funcs_live_on_to_fight_another_day() -> Result<()> {
     let engine = Engine::default();
     let mut linker = Linker::new(&engine);
     let drop_me = DropMe(flag.clone());
-    linker.func_wrap("", "", move || drop(&drop_me))?;
+    linker.func_wrap("", "", move || {
+        let _ = &drop_me;
+    })?;
     assert_eq!(flag.load(SeqCst), 0);
 
     let get_and_call = || -> Result<()> {
@@ -334,7 +338,7 @@ fn instance_pre() -> Result<()> {
     linker.func_wrap("", "", || {})?;
 
     let module = Module::new(&engine, r#"(module (import "" "" (func)))"#)?;
-    let instance_pre = linker.instantiate_pre(&mut Store::new(&engine, ()), &module)?;
+    let instance_pre = linker.instantiate_pre(&module)?;
     instance_pre.instantiate(&mut Store::new(&engine, ()))?;
     instance_pre.instantiate(&mut Store::new(&engine, ()))?;
 
@@ -344,7 +348,7 @@ fn instance_pre() -> Result<()> {
         GlobalType::new(ValType::I32, Mutability::Const),
         1.into(),
     )?;
-    linker.define("", "g", global)?;
+    linker.define(&mut store, "", "g", global)?;
 
     let module = Module::new(
         &engine,
@@ -353,13 +357,14 @@ fn instance_pre() -> Result<()> {
             (import "" "g" (global i32))
         )"#,
     )?;
-    let instance_pre = linker.instantiate_pre(&mut store, &module)?;
+    let instance_pre = linker.instantiate_pre(&module)?;
     instance_pre.instantiate(&mut store)?;
     instance_pre.instantiate(&mut store)?;
     Ok(())
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_trapping_unknown_import() -> Result<()> {
     const WAT: &str = r#"
     (module
@@ -393,6 +398,41 @@ fn test_trapping_unknown_import() -> Result<()> {
         .expect("expected an other func in the module");
 
     other_func.call(&mut store, &[], &mut [])?;
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_default_value_unknown_import() -> Result<()> {
+    const WAT: &str = r#"
+      (module
+        (import "unknown" "func" (func $unknown_func (result i64 f32 externref)))
+        (func (export "run") (result i64 f32 externref)
+          call $unknown_func
+        )
+      )
+    "#;
+
+    let mut store = Store::<()>::default();
+    let module = Module::new(store.engine(), WAT).expect("failed to create module");
+    let mut linker = Linker::new(store.engine());
+
+    linker.define_unknown_imports_as_default_values(&module)?;
+    let instance = linker.instantiate(&mut store, &module)?;
+
+    // "run" calls an import function which will not be defined, so it should
+    // return default values.
+    let run_func = instance
+        .get_func(&mut store, "run")
+        .expect("expected a run func in the module");
+
+    let mut results = vec![Val::I32(1), Val::I32(2), Val::I32(3)];
+    run_func.call(&mut store, &[], &mut results)?;
+
+    assert_eq!(results[0].i64(), Some(0));
+    assert_eq!(results[1].f32(), Some(0.0));
+    assert!(results[2].externref().unwrap().is_none());
 
     Ok(())
 }

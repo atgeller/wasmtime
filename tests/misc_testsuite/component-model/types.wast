@@ -1,8 +1,8 @@
 (component
   (type string)
   (type (func (param "a" string)))
-  (type $r (record (field "x" (record)) (field "y" string)))
-  (type $u (union $r string))
+  (type $r (record (field "x" (result)) (field "y" string)))
+  (type $u (variant (case "r" $r) (case "s" string)))
   (type $e (result $u (error u32)))
   (type (result $u))
   (type (result (error $u)))
@@ -244,5 +244,94 @@
     (type $t99 (list $t98))
     (type $t100 (list $t99))
     (type $t101 (list $t100))
+    (export "t" (type $t101))
   )
   "type nesting is too deep")
+
+(component
+  (type (instance
+    (export $x "x" (instance
+      (type $t u32)
+      (export "y" (type (eq $t)))
+    ))
+    (alias export $x "y" (type $t))
+    (export "my-y" (type (eq $t)))
+  ))
+
+  (type (component
+    (import "x" (instance $x
+      (type $t u32)
+      (export "y" (type (eq $t)))
+    ))
+    (alias export $x "y" (type $t))
+    (export "my-y" (type (eq $t)))
+  ))
+)
+
+(component
+  (type $t u32)
+  (export $t2 "t" (type $t))
+  (type $r (record (field "x" $t2)))
+  (export "r" (type $r))
+)
+
+(component
+  (component
+    (import "x" (instance $i
+      (type $i u32)
+      (export "i" (type (eq $i)))
+    ))
+    (alias export $i "i" (type $i))
+    (export "i" (type $i))
+  )
+)
+
+(component
+  (type $u u32)
+  (instance $i
+    (export "i" (type $u))
+  )
+  (alias export $i "i" (type $i))
+  (export "i" (type $i))
+)
+
+(component
+  (component $c
+    (type $t u32)
+    (export "t" (type $t))
+  )
+  (instance $c (instantiate $c))
+  (export "i" (type $c "t"))
+)
+
+(component
+  (component $c
+    (import "x" (component $c
+      (type $t u32)
+      (export "t" (type (eq $t)))
+    ))
+    (instance $c (instantiate $c))
+    (export "i" (type $c "t"))
+  )
+
+  (component $x
+    (type $t u32)
+    (export "t" (type $t))
+  )
+
+  (instance $c (instantiate $c (with "x" (component $x))))
+)
+
+(component
+  (type $t1 u64)
+  (import "a" (type $t2 (eq $t1)))
+  (import "b" (type $t3 (eq $t2)))
+)
+
+(component
+  (import "a" (instance
+    (type $t1 u64)
+    (export $t2 "a" (type (eq $t1)))
+    (export "b" (type (eq $t2)))
+  ))
+)

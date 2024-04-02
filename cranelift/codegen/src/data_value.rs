@@ -17,11 +17,6 @@ pub enum DataValue {
     I32(i32),
     I64(i64),
     I128(i128),
-    U8(u8),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    U128(u128),
     F32(Ieee32),
     F64(Ieee64),
     V128([u8; 16]),
@@ -42,16 +37,6 @@ impl PartialEq for DataValue {
             (I64(_), _) => false,
             (I128(l), I128(r)) => l == r,
             (I128(_), _) => false,
-            (U8(l), U8(r)) => l == r,
-            (U8(_), _) => false,
-            (U16(l), U16(r)) => l == r,
-            (U16(_), _) => false,
-            (U32(l), U32(r)) => l == r,
-            (U32(_), _) => false,
-            (U64(l), U64(r)) => l == r,
-            (U64(_), _) => false,
-            (U128(l), U128(r)) => l == r,
-            (U128(_), _) => false,
             (F32(l), F32(r)) => l.as_f32() == r.as_f32(),
             (F32(_), _) => false,
             (F64(l), F64(r)) => l.as_f64() == r.as_f64(),
@@ -81,11 +66,11 @@ impl DataValue {
     /// Return the Cranelift IR [Type] for this [DataValue].
     pub fn ty(&self) -> Type {
         match self {
-            DataValue::I8(_) | DataValue::U8(_) => types::I8,
-            DataValue::I16(_) | DataValue::U16(_) => types::I16,
-            DataValue::I32(_) | DataValue::U32(_) => types::I32,
-            DataValue::I64(_) | DataValue::U64(_) => types::I64,
-            DataValue::I128(_) | DataValue::U128(_) => types::I128,
+            DataValue::I8(_) => types::I8,
+            DataValue::I16(_) => types::I16,
+            DataValue::I32(_) => types::I32,
+            DataValue::I64(_) => types::I64,
+            DataValue::I128(_) => types::I128,
             DataValue::F32(_) => types::F32,
             DataValue::F64(_) => types::F64,
             DataValue::V128(_) => types::I8X16, // A default type.
@@ -101,12 +86,50 @@ impl DataValue {
         }
     }
 
-    /// Write a [DataValue] to a slice.
+    fn swap_bytes(self) -> Self {
+        match self {
+            DataValue::I8(i) => DataValue::I8(i.swap_bytes()),
+            DataValue::I16(i) => DataValue::I16(i.swap_bytes()),
+            DataValue::I32(i) => DataValue::I32(i.swap_bytes()),
+            DataValue::I64(i) => DataValue::I64(i.swap_bytes()),
+            DataValue::I128(i) => DataValue::I128(i.swap_bytes()),
+            DataValue::F32(f) => DataValue::F32(Ieee32::with_bits(f.bits().swap_bytes())),
+            DataValue::F64(f) => DataValue::F64(Ieee64::with_bits(f.bits().swap_bytes())),
+            DataValue::V128(mut v) => {
+                v.reverse();
+                DataValue::V128(v)
+            }
+            DataValue::V64(mut v) => {
+                v.reverse();
+                DataValue::V64(v)
+            }
+        }
+    }
+
+    /// Converts `self` to big endian from target's endianness.
+    pub fn to_be(self) -> Self {
+        if cfg!(target_endian = "big") {
+            self
+        } else {
+            self.swap_bytes()
+        }
+    }
+
+    /// Converts `self` to little endian from target's endianness.
+    pub fn to_le(self) -> Self {
+        if cfg!(target_endian = "little") {
+            self
+        } else {
+            self.swap_bytes()
+        }
+    }
+
+    /// Write a [DataValue] to a slice in native-endian byte order.
     ///
     /// # Panics:
     ///
     /// Panics if the slice does not have enough space to accommodate the [DataValue]
-    pub fn write_to_slice(&self, dst: &mut [u8]) {
+    pub fn write_to_slice_ne(&self, dst: &mut [u8]) {
         match self {
             DataValue::I8(i) => dst[..1].copy_from_slice(&i.to_ne_bytes()[..]),
             DataValue::I16(i) => dst[..2].copy_from_slice(&i.to_ne_bytes()[..]),
@@ -117,16 +140,33 @@ impl DataValue {
             DataValue::F64(f) => dst[..8].copy_from_slice(&f.bits().to_ne_bytes()[..]),
             DataValue::V128(v) => dst[..16].copy_from_slice(&v[..]),
             DataValue::V64(v) => dst[..8].copy_from_slice(&v[..]),
-            _ => unimplemented!(),
         };
     }
 
-    /// Read a [DataValue] from a slice using a given [Type].
+    /// Write a [DataValue] to a slice in big-endian byte order.
     ///
     /// # Panics:
     ///
     /// Panics if the slice does not have enough space to accommodate the [DataValue]
-    pub fn read_from_slice(src: &[u8], ty: Type) -> Self {
+    pub fn write_to_slice_be(&self, dst: &mut [u8]) {
+        self.clone().to_be().write_to_slice_ne(dst);
+    }
+
+    /// Write a [DataValue] to a slice in little-endian byte order.
+    ///
+    /// # Panics:
+    ///
+    /// Panics if the slice does not have enough space to accommodate the [DataValue]
+    pub fn write_to_slice_le(&self, dst: &mut [u8]) {
+        self.clone().to_le().write_to_slice_ne(dst);
+    }
+
+    /// Read a [DataValue] from a slice using a given [Type] with native-endian byte order.
+    ///
+    /// # Panics:
+    ///
+    /// Panics if the slice does not have enough space to accommodate the [DataValue]
+    pub fn read_from_slice_ne(src: &[u8], ty: Type) -> Self {
         match ty {
             types::I8 => DataValue::I8(i8::from_ne_bytes(src[..1].try_into().unwrap())),
             types::I16 => DataValue::I16(i16::from_ne_bytes(src[..2].try_into().unwrap())),
@@ -152,15 +192,33 @@ impl DataValue {
         }
     }
 
-    /// Write a [DataValue] to a memory location.
-    pub unsafe fn write_value_to(&self, p: *mut u128) {
-        let size = self.ty().bytes() as usize;
-        self.write_to_slice(std::slice::from_raw_parts_mut(p as *mut u8, size));
+    /// Read a [DataValue] from a slice using a given [Type] in big-endian byte order.
+    ///
+    /// # Panics:
+    ///
+    /// Panics if the slice does not have enough space to accommodate the [DataValue]
+    pub fn read_from_slice_be(src: &[u8], ty: Type) -> Self {
+        DataValue::read_from_slice_ne(src, ty).to_be()
     }
 
-    /// Read a [DataValue] from a memory location using a given [Type].
+    /// Read a [DataValue] from a slice using a given [Type] in little-endian byte order.
+    ///
+    /// # Panics:
+    ///
+    /// Panics if the slice does not have enough space to accommodate the [DataValue]
+    pub fn read_from_slice_le(src: &[u8], ty: Type) -> Self {
+        DataValue::read_from_slice_ne(src, ty).to_le()
+    }
+
+    /// Write a [DataValue] to a memory location in native-endian byte order.
+    pub unsafe fn write_value_to(&self, p: *mut u128) {
+        let size = self.ty().bytes() as usize;
+        self.write_to_slice_ne(std::slice::from_raw_parts_mut(p as *mut u8, size));
+    }
+
+    /// Read a [DataValue] from a memory location using a given [Type] in native-endian byte order.
     pub unsafe fn read_value_from(p: *const u128, ty: Type) -> Self {
-        DataValue::read_from_slice(
+        DataValue::read_from_slice_ne(
             std::slice::from_raw_parts(p as *const u8, ty.bytes() as usize),
             ty,
         )
@@ -248,11 +306,6 @@ build_conversion_impl!(i16, I16, I16);
 build_conversion_impl!(i32, I32, I32);
 build_conversion_impl!(i64, I64, I64);
 build_conversion_impl!(i128, I128, I128);
-build_conversion_impl!(u8, U8, I8);
-build_conversion_impl!(u16, U16, I16);
-build_conversion_impl!(u32, U32, I32);
-build_conversion_impl!(u64, U64, I64);
-build_conversion_impl!(u128, U128, I128);
 build_conversion_impl!(Ieee32, F32, F32);
 build_conversion_impl!(Ieee64, F64, F64);
 build_conversion_impl!([u8; 16], V128, I8X16);
@@ -271,11 +324,6 @@ impl Display for DataValue {
             DataValue::I32(dv) => write!(f, "{}", dv),
             DataValue::I64(dv) => write!(f, "{}", dv),
             DataValue::I128(dv) => write!(f, "{}", dv),
-            DataValue::U8(dv) => write!(f, "{}", dv),
-            DataValue::U16(dv) => write!(f, "{}", dv),
-            DataValue::U32(dv) => write!(f, "{}", dv),
-            DataValue::U64(dv) => write!(f, "{}", dv),
-            DataValue::U128(dv) => write!(f, "{}", dv),
             // The Ieee* wrappers here print the expected syntax.
             DataValue::F32(dv) => write!(f, "{}", dv),
             DataValue::F64(dv) => write!(f, "{}", dv),

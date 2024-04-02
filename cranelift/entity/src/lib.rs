@@ -29,22 +29,7 @@
 //!   references allocated from an associated memory pool. It has a much smaller footprint than
 //!   `Vec`.
 
-#![deny(missing_docs, trivial_numeric_casts, unused_extern_crates)]
-#![warn(unused_import_braces)]
-#![cfg_attr(feature = "clippy", plugin(clippy(conf_file = "../../clippy.toml")))]
-#![cfg_attr(feature = "cargo-clippy", allow(clippy::new_without_default))]
-#![cfg_attr(
-    feature = "cargo-clippy",
-    warn(
-        clippy::float_arithmetic,
-        clippy::mut_mut,
-        clippy::nonminimal_bool,
-        clippy::map_unwrap_or,
-        clippy::clippy::print_stdout,
-        clippy::unicode_not_nfc,
-        clippy::use_self
-    )
-)]
+#![deny(missing_docs)]
 #![no_std]
 
 extern crate alloc;
@@ -217,6 +202,7 @@ mod map;
 mod primary;
 mod set;
 mod sparse;
+mod unsigned;
 
 pub use self::boxed_slice::BoxedSlice;
 pub use self::iter::{Iter, IterMut};
@@ -226,6 +212,7 @@ pub use self::map::SecondaryMap;
 pub use self::primary::PrimaryMap;
 pub use self::set::EntitySet;
 pub use self::sparse::{SparseMap, SparseMapValue, SparseSet};
+pub use self::unsigned::Unsigned;
 
 /// A collection of tests to ensure that use of the different `entity_impl!` forms will generate
 /// `EntityRef` implementations that behave the same way.
@@ -254,6 +241,7 @@ mod tests {
             }
 
             #[should_panic]
+            #[cfg(debug_assertions)]
             #[test]
             fn cannot_construct_from_reserved_u32() {
                 use crate::packed_option::ReservedValue;
@@ -262,6 +250,7 @@ mod tests {
             }
 
             #[should_panic]
+            #[cfg(debug_assertions)]
             #[test]
             fn cannot_construct_from_reserved_usize() {
                 use crate::packed_option::ReservedValue;

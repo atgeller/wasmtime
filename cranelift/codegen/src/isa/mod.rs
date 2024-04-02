@@ -43,19 +43,21 @@
 //! The configured target ISA trait object is a `Box<TargetIsa>` which can be used for multiple
 //! concurrent function compilations.
 
+use crate::dominator_tree::DominatorTree;
 pub use crate::isa::call_conv::CallConv;
 
 use crate::flowgraph;
-use crate::ir::{self, Function};
+use crate::ir::{self, Function, Type};
 #[cfg(feature = "unwind")]
-use crate::isa::unwind::systemv::RegisterMappingError;
-use crate::machinst::{CompiledCode, CompiledCodeStencil, TextSectionBuilder, UnwindInfoKind};
+use crate::isa::unwind::{systemv::RegisterMappingError, UnwindInfoKind};
+use crate::machinst::{CompiledCode, CompiledCodeStencil, TextSectionBuilder};
 use crate::settings;
 use crate::settings::SetResult;
 use crate::CodegenResult;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::fmt;
 use core::fmt::{Debug, Formatter};
+use cranelift_control::ControlPlane;
 use target_lexicon::{triple, Architecture, PointerWidth, Triple};
 
 // This module is made public here for benchmarking purposes. No guarantees are
@@ -64,7 +66,7 @@ use target_lexicon::{triple, Architecture, PointerWidth, Triple};
 pub mod x64;
 
 #[cfg(feature = "arm64")]
-pub(crate) mod aarch64;
+pub mod aarch64;
 
 #[cfg(feature = "riscv64")]
 pub mod riscv64;
@@ -105,10 +107,14 @@ pub fn lookup(triple: Triple) -> Result<Builder, LookupError> {
     }
 }
 
+/// The string names of all the supported, but possibly not enabled, architectures. The elements of
+/// this slice are suitable to be passed to the [lookup_by_name] function to obtain the default
+/// configuration for that architecture.
+pub const ALL_ARCHITECTURES: &[&str] = &["x86_64", "aarch64", "s390x", "riscv64"];
+
 /// Look for a supported ISA with the given `name`.
 /// Return a builder that can create a corresponding `TargetIsa`.
 pub fn lookup_by_name(name: &str) -> Result<Builder, LookupError> {
-    use alloc::str::FromStr;
     lookup(triple!(name))
 }
 
@@ -137,17 +143,37 @@ impl fmt::Display for LookupError {
     }
 }
 
+/// The type of a polymorphic TargetISA object which is 'static.
+pub type OwnedTargetIsa = Arc<dyn TargetIsa>;
+
+/// Type alias of `IsaBuilder` used for building Cranelift's ISAs.
+pub type Builder = IsaBuilder<CodegenResult<OwnedTargetIsa>>;
+
 /// Builder for a `TargetIsa`.
 /// Modify the ISA-specific settings before creating the `TargetIsa` trait object with `finish`.
 #[derive(Clone)]
-pub struct Builder {
+pub struct IsaBuilder<T> {
     triple: Triple,
     setup: settings::Builder,
-    constructor:
-        fn(Triple, settings::Flags, settings::Builder) -> CodegenResult<Box<dyn TargetIsa>>,
+    constructor: fn(Triple, settings::Flags, &settings::Builder) -> T,
 }
 
-impl Builder {
+impl<T> IsaBuilder<T> {
+    /// Creates a new ISA-builder from its components, namely the `triple` for
+    /// the ISA, the ISA-specific settings builder, and a final constructor
+    /// function to generate the ISA from its components.
+    pub fn new(
+        triple: Triple,
+        setup: settings::Builder,
+        constructor: fn(Triple, settings::Flags, &settings::Builder) -> T,
+    ) -> Self {
+        IsaBuilder {
+            triple,
+            setup,
+            constructor,
+        }
+    }
+
     /// Gets the triple for the builder.
     pub fn triple(&self) -> &Triple {
         &self.triple
@@ -164,12 +190,12 @@ impl Builder {
     /// flags are inconsistent or incompatible: for example, some
     /// platform-independent features, like general SIMD support, may
     /// need certain ISA extensions to be enabled.
-    pub fn finish(self, shared_flags: settings::Flags) -> CodegenResult<Box<dyn TargetIsa>> {
-        (self.constructor)(self.triple, shared_flags, self.setup)
+    pub fn finish(&self, shared_flags: settings::Flags) -> T {
+        (self.constructor)(self.triple.clone(), shared_flags, &self.setup)
     }
 }
 
-impl settings::Configurable for Builder {
+impl<T> settings::Configurable for IsaBuilder<T> {
     fn set(&mut self, name: &str, value: &str) -> SetResult<()> {
         self.setup.set(name, value)
     }
@@ -227,9 +253,6 @@ pub trait TargetIsa: fmt::Display + Send + Sync {
     /// Get the ISA-independent flags that were used to make this trait object.
     fn flags(&self) -> &settings::Flags;
 
-    /// Get the ISA-dependent MachineEnv for managing register allocation.
-    fn machine_env(&self) -> &regalloc2::MachineEnv;
-
     /// Get the ISA-dependent flag values that were used to make this trait object.
     fn isa_flags(&self) -> Vec<settings::Value>;
 
@@ -245,7 +268,9 @@ pub trait TargetIsa: fmt::Display + Send + Sync {
     fn compile_function(
         &self,
         func: &Function,
+        domtree: &DominatorTree,
         want_disasm: bool,
+        ctrl_plane: &mut ControlPlane,
     ) -> CodegenResult<CompiledCodeStencil>;
 
     #[cfg(feature = "unwind")]
@@ -256,9 +281,6 @@ pub trait TargetIsa: fmt::Display + Send + Sync {
     ) -> Result<u16, RegisterMappingError> {
         Err(RegisterMappingError::UnsupportedArchitecture)
     }
-
-    /// IntCC condition for Unsigned Addition Overflow (Carry).
-    fn unsigned_add_overflow_condition(&self) -> ir::condcodes::IntCC;
 
     /// Creates unwind information for the function.
     ///
@@ -290,8 +312,59 @@ pub trait TargetIsa: fmt::Display + Send + Sync {
     /// of defined functions in the object file.
     fn text_section_builder(&self, num_labeled_funcs: usize) -> Box<dyn TextSectionBuilder>;
 
-    /// The function alignment required by this ISA.
-    fn function_alignment(&self) -> u32;
+    /// Returns the minimum function alignment and the preferred function
+    /// alignment, for performance, required by this ISA.
+    fn function_alignment(&self) -> FunctionAlignment;
+
+    /// Create a polymorphic TargetIsa from this specific implementation.
+    fn wrapped(self) -> OwnedTargetIsa
+    where
+        Self: Sized + 'static,
+    {
+        Arc::new(self)
+    }
+
+    /// Generate a `Capstone` context for disassembling bytecode for this architecture.
+    #[cfg(feature = "disas")]
+    fn to_capstone(&self) -> Result<capstone::Capstone, capstone::Error> {
+        Err(capstone::Error::UnsupportedArch)
+    }
+
+    /// Returns whether this ISA has a native fused-multiply-and-add instruction
+    /// for floats.
+    ///
+    /// Currently this only returns false on x86 when some native features are
+    /// not detected.
+    fn has_native_fma(&self) -> bool;
+
+    /// Returns whether the CLIF `x86_blendv` instruction is implemented for
+    /// this ISA for the specified type.
+    fn has_x86_blendv_lowering(&self, ty: Type) -> bool;
+
+    /// Returns whether the CLIF `x86_pshufb` instruction is implemented for
+    /// this ISA.
+    fn has_x86_pshufb_lowering(&self) -> bool;
+
+    /// Returns whether the CLIF `x86_pmulhrsw` instruction is implemented for
+    /// this ISA.
+    fn has_x86_pmulhrsw_lowering(&self) -> bool;
+
+    /// Returns whether the CLIF `x86_pmaddubsw` instruction is implemented for
+    /// this ISA.
+    fn has_x86_pmaddubsw_lowering(&self) -> bool;
+}
+
+/// Function alignment specifications as required by an ISA, returned by
+/// [`TargetIsa::function_alignment`].
+#[derive(Copy, Clone)]
+pub struct FunctionAlignment {
+    /// The minimum alignment required by an ISA, where all functions must be
+    /// aligned to at least this amount.
+    pub minimum: u32,
+    /// A "preferred" alignment which should be used for more
+    /// performance-sensitive situations. This can involve cache-line-aligning
+    /// for example to get more of a small function into fewer cache lines.
+    pub preferred: u32,
 }
 
 /// Methods implemented for free for target ISA!
@@ -306,24 +379,6 @@ impl<'a> dyn TargetIsa + 'a {
         match self.triple().endianness().unwrap() {
             target_lexicon::Endianness::Little => ir::Endianness::Little,
             target_lexicon::Endianness::Big => ir::Endianness::Big,
-        }
-    }
-
-    /// Returns the code (text) section alignment for this ISA.
-    pub fn code_section_alignment(&self) -> u64 {
-        use target_lexicon::*;
-        match (self.triple().operating_system, self.triple().architecture) {
-            (
-                OperatingSystem::MacOSX { .. }
-                | OperatingSystem::Darwin
-                | OperatingSystem::Ios
-                | OperatingSystem::Tvos,
-                Architecture::Aarch64(..),
-            ) => 0x4000,
-            // 64 KB is the maximal page size (i.e. memory translation granule size)
-            // supported by the architecture and is used on some platforms.
-            (_, Architecture::Aarch64(..)) => 0x10000,
-            _ => 0x1000,
         }
     }
 

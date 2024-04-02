@@ -45,16 +45,15 @@
 ;;     gv2 = load.i64 notrap aligned readonly gv0
 ;;
 ;;                                 block0(v0: i64, v1: i32, v2: i64):
-;; @0040                               v3 = iconst.i64 0xffff_0001
-;; @0040                               v4 = uadd_overflow_trap v0, v3, heap_oob  ; v3 = 0xffff_0001
-;; @0040                               v5 = global_value.i64 gv1
-;; @0040                               v6 = global_value.i64 gv2
-;; @0040                               v7 = iadd v6, v0
-;; @0040                               v8 = iadd_imm v7, 0xffff_0000
+;; @0040                               v3 = global_value.i64 gv1
+;; @0040                               v4 = icmp ugt v0, v3
+;; @0040                               v5 = global_value.i64 gv2
+;; @0040                               v6 = iadd v5, v0
+;; @0040                               v7 = iconst.i64 0xffff_0000
+;; @0040                               v8 = iadd v6, v7  ; v7 = 0xffff_0000
 ;; @0040                               v9 = iconst.i64 0
-;; @0040                               v10 = icmp ugt v4, v5
-;; @0040                               v11 = select_spectre_guard v10, v9, v8  ; v9 = 0
-;; @0040                               istore8 little heap v1, v11
+;; @0040                               v10 = select_spectre_guard v4, v9, v8  ; v9 = 0
+;; @0040                               istore8 little heap v1, v10
 ;; @0047                               jump block1
 ;;
 ;;                                 block1:
@@ -67,17 +66,16 @@
 ;;     gv2 = load.i64 notrap aligned readonly gv0
 ;;
 ;;                                 block0(v0: i64, v1: i64):
-;; @004c                               v3 = iconst.i64 0xffff_0001
-;; @004c                               v4 = uadd_overflow_trap v0, v3, heap_oob  ; v3 = 0xffff_0001
-;; @004c                               v5 = global_value.i64 gv1
-;; @004c                               v6 = global_value.i64 gv2
-;; @004c                               v7 = iadd v6, v0
-;; @004c                               v8 = iadd_imm v7, 0xffff_0000
+;; @004c                               v3 = global_value.i64 gv1
+;; @004c                               v4 = icmp ugt v0, v3
+;; @004c                               v5 = global_value.i64 gv2
+;; @004c                               v6 = iadd v5, v0
+;; @004c                               v7 = iconst.i64 0xffff_0000
+;; @004c                               v8 = iadd v6, v7  ; v7 = 0xffff_0000
 ;; @004c                               v9 = iconst.i64 0
-;; @004c                               v10 = icmp ugt v4, v5
-;; @004c                               v11 = select_spectre_guard v10, v9, v8  ; v9 = 0
-;; @004c                               v12 = uload8.i32 little heap v11
-;; @0053                               jump block1(v12)
+;; @004c                               v10 = select_spectre_guard v4, v9, v8  ; v9 = 0
+;; @004c                               v11 = uload8.i32 little heap v10
+;; @0053                               jump block1(v11)
 ;;
 ;;                                 block1(v2: i32):
 ;; @0053                               return v2

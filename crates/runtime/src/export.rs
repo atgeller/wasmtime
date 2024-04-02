@@ -1,5 +1,5 @@
 use crate::vmcontext::{
-    VMCallerCheckedAnyfunc, VMContext, VMGlobalDefinition, VMMemoryDefinition, VMTableDefinition,
+    VMContext, VMFuncRef, VMGlobalDefinition, VMMemoryDefinition, VMTableDefinition,
 };
 use std::ptr::NonNull;
 use wasmtime_environ::{DefinedMemoryIndex, Global, MemoryPlan, TablePlan};
@@ -22,11 +22,11 @@ pub enum Export {
 /// A function export value.
 #[derive(Debug, Clone, Copy)]
 pub struct ExportFunction {
-    /// The `VMCallerCheckedAnyfunc` for this exported function.
+    /// The `VMFuncRef` for this exported function.
     ///
     /// Note that exported functions cannot be a null funcref, so this is a
     /// non-null pointer.
-    pub anyfunc: NonNull<VMCallerCheckedAnyfunc>,
+    pub func_ref: NonNull<VMFuncRef>,
 }
 
 // It's part of the contract of using `ExportFunction` that synchronization

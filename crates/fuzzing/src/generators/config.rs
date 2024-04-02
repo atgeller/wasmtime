@@ -73,13 +73,15 @@ impl Config {
         // If using the pooling allocator, update the instance limits too
         if let InstanceAllocationStrategy::Pooling(pooling) = &mut self.wasmtime.strategy {
             // One single-page memory
-            pooling.instance_memories = config.max_memories as u32;
-            pooling.instance_memory_pages = 10;
+            pooling.total_memories = config.max_memories as u32;
+            pooling.memory_pages = 10;
+            pooling.max_memories_per_module = config.max_memories as u32;
 
-            pooling.instance_tables = config.max_tables as u32;
-            pooling.instance_table_elements = 1_000;
+            pooling.total_tables = config.max_tables as u32;
+            pooling.table_elements = 1_000;
+            pooling.max_tables_per_module = config.max_tables as u32;
 
-            pooling.instance_size = 1_000_000;
+            pooling.core_instance_size = 1_000_000;
         }
     }
 
@@ -97,31 +99,47 @@ impl Config {
         self.module_config.generate(input, default_fuel)
     }
 
-    /// Indicates that this configuration should be spec-test-compliant,
-    /// disabling various features the spec tests assert are disabled.
-    pub fn set_spectest_compliant(&mut self) {
-        let config = &mut self.module_config.config;
-        config.memory64_enabled = false;
-        config.bulk_memory_enabled = true;
-        config.reference_types_enabled = true;
-        config.multi_value_enabled = true;
-        config.simd_enabled = true;
-        config.threads_enabled = false;
-        config.max_memories = 1;
-        config.max_tables = 5;
+    /// Tests whether this configuration is capable of running all spec tests.
+    pub fn is_spectest_compliant(&self) -> bool {
+        let config = &self.module_config.config;
 
-        if let InstanceAllocationStrategy::Pooling(pooling) = &mut self.wasmtime.strategy {
-            // Configure the lower bound of a number of limits to what's
-            // required to actually run the spec tests. Fuzz-generated inputs
-            // may have limits less than these thresholds which would cause the
-            // spec tests to fail which isn't particularly interesting.
-            pooling.instance_memories = 1;
-            pooling.instance_tables = pooling.instance_tables.max(5);
-            pooling.instance_table_elements = pooling.instance_table_elements.max(1_000);
-            pooling.instance_memory_pages = pooling.instance_memory_pages.max(900);
-            pooling.instance_count = pooling.instance_count.max(500);
-            pooling.instance_size = pooling.instance_size.max(64 * 1024);
+        // Check for wasm features that must be disabled to run spec tests
+        if config.memory64_enabled || config.threads_enabled {
+            return false;
         }
+
+        // Check for wasm features that must be enabled to run spec tests
+        if !config.bulk_memory_enabled
+            || !config.reference_types_enabled
+            || !config.multi_value_enabled
+            || !config.simd_enabled
+        {
+            return false;
+        }
+
+        // Make sure the runtime limits allow for the instantiation of all spec
+        // tests. Note that the max memories must be precisely one since 0 won't
+        // instantiate spec tests and more than one is multi-memory which is
+        // disabled for spec tests.
+        if config.max_memories != 1 || config.max_tables < 5 {
+            return false;
+        }
+
+        if let InstanceAllocationStrategy::Pooling(pooling) = &self.wasmtime.strategy {
+            // Check to see if any item limit is less than the required
+            // threshold to execute the spec tests.
+            if pooling.total_memories < 1
+                || pooling.total_tables < 5
+                || pooling.table_elements < 1_000
+                || pooling.memory_pages < 900
+                || pooling.total_core_instances < 500
+                || pooling.core_instance_size < 64 * 1024
+            {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Converts this to a `wasmtime::Config` object
@@ -136,11 +154,11 @@ impl Config {
             .wasm_multi_memory(self.module_config.config.max_memories > 1)
             .wasm_simd(self.module_config.config.simd_enabled)
             .wasm_memory64(self.module_config.config.memory64_enabled)
+            .wasm_tail_call(self.module_config.config.tail_call_enabled)
             .wasm_threads(self.module_config.config.threads_enabled)
-            .native_unwind_info(self.wasmtime.native_unwind_info)
+            .native_unwind_info(cfg!(target_os = "windows") || self.wasmtime.native_unwind_info)
             .cranelift_nan_canonicalization(self.wasmtime.canonicalize_nans)
             .cranelift_opt_level(self.wasmtime.opt_level.to_wasmtime())
-            .cranelift_use_egraphs(self.wasmtime.use_egraphs)
             .consume_fuel(self.wasmtime.consume_fuel)
             .epoch_interruption(self.wasmtime.epoch_interruption)
             .memory_init_cow(self.wasmtime.memory_init_cow)
@@ -153,34 +171,46 @@ impl Config {
             .allocation_strategy(self.wasmtime.strategy.to_wasmtime())
             .generate_address_map(self.wasmtime.generate_address_map);
 
+        if !self.module_config.config.simd_enabled {
+            cfg.wasm_relaxed_simd(false);
+        }
+
+        let compiler_strategy = &self.wasmtime.compiler_strategy;
+        let cranelift_strategy = *compiler_strategy == CompilerStrategy::Cranelift;
+        cfg.strategy(self.wasmtime.compiler_strategy.to_wasmtime());
+
         self.wasmtime.codegen.configure(&mut cfg);
 
-        // If the wasm-smith-generated module use nan canonicalization then we
-        // don't need to enable it, but if it doesn't enable it already then we
-        // enable this codegen option.
-        cfg.cranelift_nan_canonicalization(!self.module_config.config.canonicalize_nans);
+        // Only set cranelift specific flags when the Cranelift strategy is
+        // chosen.
+        if cranelift_strategy {
+            // If the wasm-smith-generated module use nan canonicalization then we
+            // don't need to enable it, but if it doesn't enable it already then we
+            // enable this codegen option.
+            cfg.cranelift_nan_canonicalization(!self.module_config.config.canonicalize_nans);
 
-        // Enabling the verifier will at-least-double compilation time, which
-        // with a 20-30x slowdown in fuzzing can cause issues related to
-        // timeouts. If generated modules can have more than a small handful of
-        // functions then disable the verifier when fuzzing to try to lessen the
-        // impact of timeouts.
-        if self.module_config.config.max_funcs > 10 {
-            cfg.cranelift_debug_verifier(false);
-        }
-
-        if self.wasmtime.force_jump_veneers {
-            unsafe {
-                cfg.cranelift_flag_set("wasmtime_linkopt_force_jump_veneer", "true");
+            // Enabling the verifier will at-least-double compilation time, which
+            // with a 20-30x slowdown in fuzzing can cause issues related to
+            // timeouts. If generated modules can have more than a small handful of
+            // functions then disable the verifier when fuzzing to try to lessen the
+            // impact of timeouts.
+            if self.module_config.config.max_funcs > 10 {
+                cfg.cranelift_debug_verifier(false);
             }
-        }
 
-        if let Some(pad) = self.wasmtime.padding_between_functions {
-            unsafe {
-                cfg.cranelift_flag_set(
-                    "wasmtime_linkopt_padding_between_functions",
-                    &pad.to_string(),
-                );
+            if self.wasmtime.force_jump_veneers {
+                unsafe {
+                    cfg.cranelift_flag_set("wasmtime_linkopt_force_jump_veneer", "true");
+                }
+            }
+
+            if let Some(pad) = self.wasmtime.padding_between_functions {
+                unsafe {
+                    cfg.cranelift_flag_set(
+                        "wasmtime_linkopt_padding_between_functions",
+                        &pad.to_string(),
+                    );
+                }
             }
         }
 
@@ -230,7 +260,7 @@ impl Config {
     pub fn configure_store(&self, store: &mut Store<StoreLimits>) {
         store.limiter(|s| s as &mut dyn wasmtime::ResourceLimiter);
         if self.wasmtime.consume_fuel {
-            store.add_fuel(u64::max_value()).unwrap();
+            store.set_fuel(u64::MAX).unwrap();
         }
         if self.wasmtime.epoch_interruption {
             // Without fuzzing of async execution, we can't test the
@@ -249,7 +279,7 @@ impl Config {
     /// Generates an arbitrary method of timing out an instance, ensuring that
     /// this configuration supports the returned timeout.
     pub fn generate_timeout(&mut self, u: &mut Unstructured<'_>) -> arbitrary::Result<Timeout> {
-        let time_duration = Duration::from_secs(20);
+        let time_duration = Duration::from_millis(100);
         let timeout = u
             .choose(&[Timeout::Fuel(100_000), Timeout::Epoch(time_duration)])?
             .clone();
@@ -294,6 +324,10 @@ impl<'a> Arbitrary<'a> for Config {
             module_config: u.arbitrary()?,
         };
 
+        // This is pulled from `u` by default via `wasm-smith`, but Wasmtime
+        // doesn't implement this yet, so forcibly always disable it.
+        config.module_config.config.tail_call_enabled = false;
+
         // If using the pooling allocator, constrain the memory and module configurations
         // to the module limits.
         if let InstanceAllocationStrategy::Pooling(pooling) = &mut config.wasmtime.strategy {
@@ -305,23 +339,23 @@ impl<'a> Arbitrary<'a> for Config {
 
             // Ensure the pooling allocator can support the maximal size of
             // memory, picking the smaller of the two to win.
-            if cfg.max_memory_pages < pooling.instance_memory_pages {
-                pooling.instance_memory_pages = cfg.max_memory_pages;
+            if cfg.max_memory_pages < pooling.memory_pages {
+                pooling.memory_pages = cfg.max_memory_pages;
             } else {
-                cfg.max_memory_pages = pooling.instance_memory_pages;
+                cfg.max_memory_pages = pooling.memory_pages;
             }
 
             // If traps are disallowed then memories must have at least one page
             // of memory so if we still are only allowing 0 pages of memory then
             // increase that to one here.
             if cfg.disallow_traps {
-                if pooling.instance_memory_pages == 0 {
-                    pooling.instance_memory_pages = 1;
+                if pooling.memory_pages == 0 {
+                    pooling.memory_pages = 1;
                     cfg.max_memory_pages = 1;
                 }
                 // .. additionally update tables
-                if pooling.instance_table_elements == 0 {
-                    pooling.instance_table_elements = 1;
+                if pooling.table_elements == 0 {
+                    pooling.table_elements = 1;
                 }
             }
 
@@ -338,8 +372,8 @@ impl<'a> Arbitrary<'a> for Config {
 
             // Force this pooling allocator to always be able to accommodate the
             // module that may be generated.
-            pooling.instance_memories = cfg.max_memories as u32;
-            pooling.instance_tables = cfg.max_tables as u32;
+            pooling.total_memories = cfg.max_memories as u32;
+            pooling.total_tables = cfg.max_tables as u32;
         }
 
         Ok(config)
@@ -351,7 +385,6 @@ impl<'a> Arbitrary<'a> for Config {
 #[derive(Arbitrary, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct WasmtimeConfig {
     opt_level: OptLevel,
-    use_egraphs: bool,
     debug_info: bool,
     canonicalize_nans: bool,
     interruptable: bool,
@@ -369,6 +402,8 @@ pub struct WasmtimeConfig {
     padding_between_functions: Option<u16>,
     generate_address_map: bool,
     native_unwind_info: bool,
+    /// Configuration for the compiler to use.
+    pub compiler_strategy: CompilerStrategy,
 }
 
 impl WasmtimeConfig {
@@ -410,5 +445,33 @@ impl OptLevel {
             OptLevel::Speed => wasmtime::OptLevel::Speed,
             OptLevel::SpeedAndSize => wasmtime::OptLevel::SpeedAndSize,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Compiler to use.
+pub enum CompilerStrategy {
+    /// Cranelift compiler.
+    Cranelift,
+    /// Winch compiler.
+    Winch,
+}
+
+impl CompilerStrategy {
+    fn to_wasmtime(&self) -> wasmtime::Strategy {
+        match self {
+            CompilerStrategy::Cranelift => wasmtime::Strategy::Cranelift,
+            CompilerStrategy::Winch => wasmtime::Strategy::Winch,
+        }
+    }
+}
+
+// Unconditionally return `Cranelift` given that Winch is not ready to be
+// enabled by default in all the fuzzing targets. Each fuzzing target is
+// expected to explicitly override the strategy as needed. Currently only the
+// differential target overrides the compiler strategy.
+impl Arbitrary<'_> for CompilerStrategy {
+    fn arbitrary(_: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self::Cranelift)
     }
 }

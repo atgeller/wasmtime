@@ -8,19 +8,21 @@
 use crate::entity::SecondaryMap;
 use crate::fx::{FxHashMap, FxHashSet};
 use crate::inst_predicates::{has_lowering_side_effect, is_constant_64bit};
+use crate::ir::pcc::{Fact, FactContext, PccError, PccResult};
 use crate::ir::{
     ArgumentPurpose, Block, Constant, ConstantData, DataFlowGraph, ExternalName, Function,
-    GlobalValue, GlobalValueData, Immediate, Inst, InstructionData, MemFlags, Opcode, RelSourceLoc,
-    Type, Value, ValueDef, ValueLabelAssignments, ValueLabelStart,
+    GlobalValue, GlobalValueData, Immediate, Inst, InstructionData, MemFlags, RelSourceLoc, Type,
+    Value, ValueDef, ValueLabelAssignments, ValueLabelStart,
 };
 use crate::machinst::{
-    writable_value_regs, BlockIndex, BlockLoweringOrder, Callee, LoweredBlock, MachLabel, Reg,
-    SigSet, VCode, VCodeBuilder, VCodeConstant, VCodeConstantData, VCodeConstants, VCodeInst,
-    ValueRegs, Writable,
+    writable_value_regs, BlockIndex, BlockLoweringOrder, Callee, InsnIndex, LoweredBlock,
+    MachLabel, Reg, SigSet, VCode, VCodeBuilder, VCodeConstant, VCodeConstantData, VCodeConstants,
+    VCodeInst, ValueRegs, Writable,
 };
+use crate::settings::Flags;
 use crate::{trace, CodegenResult};
 use alloc::vec::Vec;
-use regalloc2::{MachineEnv, PRegSet};
+use cranelift_control::ControlPlane;
 use smallvec::{smallvec, SmallVec};
 use std::fmt::Debug;
 
@@ -145,6 +147,22 @@ pub trait LowerBackend {
     fn maybe_pinned_reg(&self) -> Option<Reg> {
         None
     }
+
+    /// The type of state carried between `check_fact` invocations.
+    type FactFlowState: Default + Clone + Debug;
+
+    /// Check any facts about an instruction, given VCode with facts
+    /// on VRegs. Takes mutable `VCode` so that it can propagate some
+    /// kinds of facts automatically.
+    fn check_fact(
+        &self,
+        _ctx: &FactContext<'_>,
+        _vcode: &mut VCode<Self::MInst>,
+        _inst: InsnIndex,
+        _state: &mut Self::FactFlowState,
+    ) -> PccResult<()> {
+        Err(PccError::UnimplementedBackend)
+    }
 }
 
 /// Machine-independent lowering driver / machine-instruction container. Maintains a correspondence
@@ -152,9 +170,6 @@ pub trait LowerBackend {
 pub struct Lower<'func, I: VCodeInst> {
     /// The function to lower.
     f: &'func Function,
-
-    /// The set of allocatable registers.
-    allocatable: PRegSet,
 
     /// Lowered machine instructions.
     vcode: VCodeBuilder<I>,
@@ -209,6 +224,9 @@ pub struct Lower<'func, I: VCodeInst> {
 
     /// The register to use for GetPinnedReg, if any, on this architecture.
     pinned_reg: Option<Reg>,
+
+    /// Compilation flags.
+    flags: Flags,
 }
 
 /// How is a value used in the IR?
@@ -328,11 +346,11 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
     /// Prepare a new lowering context for the given IR function.
     pub fn new(
         f: &'func Function,
-        machine_env: &MachineEnv,
         abi: Callee<I::ABIMachineSpec>,
         emit_info: I::Info,
         block_order: BlockLoweringOrder,
         sigs: SigSet,
+        flags: Flags,
     ) -> CodegenResult<Self> {
         let constants = VCodeConstants::with_capacity(f.dfg.constants.len());
         let vcode = VCodeBuilder::new(
@@ -353,7 +371,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             for &param in f.dfg.block_params(bb) {
                 let ty = f.dfg.value_type(param);
                 if value_regs[param].is_invalid() {
-                    let regs = vregs.alloc(ty)?;
+                    let regs = vregs.alloc_with_maybe_fact(ty, f.dfg.facts[param].clone())?;
                     value_regs[param] = regs;
                     trace!("bb {} param {}: regs {:?}", bb, param, regs);
                 }
@@ -362,7 +380,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                 for &result in f.dfg.inst_results(inst) {
                     let ty = f.dfg.value_type(result);
                     if value_regs[result].is_invalid() && !ty.is_invalid() {
-                        let regs = vregs.alloc(ty)?;
+                        let regs = vregs.alloc_with_maybe_fact(ty, f.dfg.facts[result].clone())?;
                         value_regs[result] = regs;
                         trace!(
                             "bb {} inst {} ({:?}): result {} regs {:?}",
@@ -377,12 +395,27 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             }
         }
 
-        // Make a sret register, if one is needed.
+        // Find the sret register, if it's used.
         let mut sret_reg = None;
-        for ret in &vcode.abi().signature().returns.clone() {
+        for ret in vcode.abi().signature().returns.iter() {
             if ret.purpose == ArgumentPurpose::StructReturn {
-                assert!(sret_reg.is_none());
-                sret_reg = Some(vregs.alloc(ret.value_type)?);
+                let entry_bb = f.stencil.layout.entry_block().unwrap();
+                for (&param, sig_param) in f
+                    .dfg
+                    .block_params(entry_bb)
+                    .iter()
+                    .zip(vcode.abi().signature().params.iter())
+                {
+                    if sig_param.purpose == ArgumentPurpose::StructReturn {
+                        let regs = value_regs[param];
+                        assert!(regs.len() == 1);
+
+                        assert!(sret_reg.is_none());
+                        sret_reg = Some(regs);
+                    }
+                }
+
+                assert!(sret_reg.is_some());
             }
         }
 
@@ -418,7 +451,6 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 
         Ok(Lower {
             f,
-            allocatable: PRegSet::from(machine_env),
             vcode,
             vregs,
             value_regs,
@@ -433,6 +465,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             cur_inst: None,
             ir_insts: vec![],
             pinned_reg: None,
+            flags,
         })
     }
 
@@ -465,56 +498,25 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         // Once, Multiple} is part of what makes this pass more
         // efficient than a full indirect-use-counting pass.
 
-        let mut value_ir_uses: SecondaryMap<Value, ValueUseState> =
-            SecondaryMap::with_default(ValueUseState::Unused);
+        let mut value_ir_uses = SecondaryMap::with_default(ValueUseState::Unused);
 
         // Stack of iterators over Values as we do DFS to mark
-        // Multiple-state subtrees.
-        type StackVec<'a> = SmallVec<[std::slice::Iter<'a, Value>; 16]>;
-        let mut stack: StackVec = smallvec![];
+        // Multiple-state subtrees. The iterator type is whatever is
+        // returned by `uses` below.
+        let mut stack: SmallVec<[_; 16]> = smallvec![];
 
-        // Push args for a given inst onto the DFS stack.
-        let push_args_on_stack = |stack: &mut StackVec<'a>, value| {
+        // Find the args for the inst corresponding to the given value.
+        let uses = |value| {
             trace!(" -> pushing args for {} onto stack", value);
             if let ValueDef::Result(src_inst, _) = f.dfg.value_def(value) {
-                stack.push(f.dfg.inst_args(src_inst).iter());
+                Some(f.dfg.inst_values(src_inst))
+            } else {
+                None
             }
         };
 
         // Do a DFS through `value_ir_uses` to mark a subtree as
         // Multiple.
-        let mark_all_uses_as_multiple =
-            |value_ir_uses: &mut SecondaryMap<Value, ValueUseState>, stack: &mut StackVec<'a>| {
-                while let Some(iter) = stack.last_mut() {
-                    if let Some(&value) = iter.next() {
-                        let value = f.dfg.resolve_aliases(value);
-                        trace!(" -> DFS reaches {}", value);
-                        if value_ir_uses[value] == ValueUseState::Multiple {
-                            // Truncate DFS here: no need to go further,
-                            // as whole subtree must already be Multiple.
-                            #[cfg(debug_assertions)]
-                            {
-                                // With debug asserts, check one level
-                                // of that invariant at least.
-                                if let ValueDef::Result(src_inst, _) = f.dfg.value_def(value) {
-                                    debug_assert!(f.dfg.inst_args(src_inst).iter().all(|&arg| {
-                                        let arg = f.dfg.resolve_aliases(arg);
-                                        value_ir_uses[arg] == ValueUseState::Multiple
-                                    }));
-                                }
-                            }
-                            continue;
-                        }
-                        value_ir_uses[value] = ValueUseState::Multiple;
-                        trace!(" -> became Multiple");
-                        push_args_on_stack(stack, value);
-                    } else {
-                        // Empty iterator, discard.
-                        stack.pop();
-                    }
-                }
-            };
-
         for inst in f
             .layout
             .blocks()
@@ -525,9 +527,9 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             // could come in as Once on our two different results.
             let force_multiple = f.dfg.inst_results(inst).len() > 1;
 
-            // Iterate over all args of all instructions, noting an
-            // additional use on each operand. If an operand becomes Multiple,
-            for &arg in f.dfg.inst_args(inst) {
+            // Iterate over all values used by all instructions, noting an
+            // additional use on each operand.
+            for arg in f.dfg.inst_values(inst) {
                 let arg = f.dfg.resolve_aliases(arg);
                 let old = value_ir_uses[arg];
                 if force_multiple {
@@ -540,11 +542,39 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                     value_ir_uses[arg].inc();
                 }
                 let new = value_ir_uses[arg];
-                trace!("arg {} used, old state {:?}, new {:?}", arg, old, new,);
+                trace!("arg {} used, old state {:?}, new {:?}", arg, old, new);
+
                 // On transition to Multiple, do DFS.
-                if old != ValueUseState::Multiple && new == ValueUseState::Multiple {
-                    push_args_on_stack(&mut stack, arg);
-                    mark_all_uses_as_multiple(&mut value_ir_uses, &mut stack);
+                if old == ValueUseState::Multiple || new != ValueUseState::Multiple {
+                    continue;
+                }
+                if let Some(iter) = uses(arg) {
+                    stack.push(iter);
+                }
+                while let Some(iter) = stack.last_mut() {
+                    if let Some(value) = iter.next() {
+                        let value = f.dfg.resolve_aliases(value);
+                        trace!(" -> DFS reaches {}", value);
+                        if value_ir_uses[value] == ValueUseState::Multiple {
+                            // Truncate DFS here: no need to go further,
+                            // as whole subtree must already be Multiple.
+                            // With debug asserts, check one level of
+                            // that invariant at least.
+                            debug_assert!(uses(value).into_iter().flatten().all(|arg| {
+                                let arg = f.dfg.resolve_aliases(arg);
+                                value_ir_uses[arg] == ValueUseState::Multiple
+                            }));
+                            continue;
+                        }
+                        value_ir_uses[value] = ValueUseState::Multiple;
+                        trace!(" -> became Multiple");
+                        if let Some(iter) = uses(value) {
+                            stack.push(iter);
+                        }
+                    } else {
+                        // Empty iterator, discard.
+                        stack.pop();
+                    }
                 }
             }
         }
@@ -578,24 +608,6 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                     .into_iter()
                 {
                     self.emit(insn);
-                }
-                if self.abi().signature().params[i].purpose == ArgumentPurpose::StructReturn {
-                    assert!(regs.len() == 1);
-                    let ty = self.abi().signature().params[i].value_type;
-                    // The ABI implementation must have ensured that a StructReturn
-                    // arg is present in the return values.
-                    assert!(self
-                        .abi()
-                        .signature()
-                        .returns
-                        .iter()
-                        .position(|ret| ret.purpose == ArgumentPurpose::StructReturn)
-                        .is_some());
-                    self.emit(I::gen_move(
-                        Writable::from_reg(self.sret_reg.unwrap().regs()[0]),
-                        regs.regs()[0].to_reg(),
-                        ty,
-                    ));
                 }
             }
             if let Some(insn) = self
@@ -660,7 +672,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             }
         }
 
-        let inst = self.abi().gen_ret(out_rets);
+        let inst = self.abi().gen_rets(out_rets);
         self.emit(inst);
     }
 
@@ -683,6 +695,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         &mut self,
         backend: &B,
         block: Block,
+        ctrl_plane: &mut ControlPlane,
     ) -> CodegenResult<()> {
         self.cur_scan_entry_color = Some(self.block_end_colors[block]);
         // Lowering loop:
@@ -774,12 +787,41 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                     debug_assert_eq!(regs.len(), dsts.len());
                     for (dst, temp) in dsts.regs().iter().zip(regs.regs().iter()) {
                         self.set_vreg_alias(*dst, *temp);
+
+                        // If there was any PCC fact about the
+                        // original VReg, move it to the aliased reg
+                        // instead. Lookup goes through the alias, but
+                        // we want to preserve whatever was stated
+                        // about the vreg before its producer was
+                        // lowered.
+                        if let Some(fact) =
+                            self.vregs.take_fact(dst.to_virtual_reg().unwrap().into())
+                        {
+                            self.vregs
+                                .set_fact(temp.to_virtual_reg().unwrap().into(), fact);
+                        }
                     }
                 }
             }
 
             let loc = self.srcloc(inst);
             self.finish_ir_inst(loc);
+
+            // maybe insert random instruction
+            if ctrl_plane.get_decision() {
+                if ctrl_plane.get_decision() {
+                    let imm: u64 = ctrl_plane.get_arbitrary();
+                    let reg = self.alloc_tmp(crate::ir::types::I64).regs()[0];
+                    I::gen_imm_u64(imm, reg).map(|inst| self.emit(inst));
+                } else {
+                    let imm: f64 = ctrl_plane.get_arbitrary();
+                    let tmp = self.alloc_tmp(crate::ir::types::I64).regs()[0];
+                    let reg = self.alloc_tmp(crate::ir::types::F64).regs()[0];
+                    for inst in I::gen_imm_f64(imm, tmp, reg) {
+                        self.emit(inst);
+                    }
+                }
+            }
 
             // Emit value-label markers if needed, to later recover
             // debug mappings. This must happen before the instruction
@@ -901,39 +943,29 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         bindex: BlockIndex,
         // Original CLIF block:
         block: Block,
-        branches: &SmallVec<[Inst; 2]>,
-        targets: &SmallVec<[MachLabel; 2]>,
+        branch: Inst,
+        targets: &[MachLabel],
     ) -> CodegenResult<()> {
         trace!(
-            "lower_clif_branches: block {} branches {:?} targets {:?}",
+            "lower_clif_branches: block {} branch {:?} targets {:?}",
             block,
-            branches,
+            branch,
             targets,
         );
-        // A block should end with at most two branches. The first may be a
-        // conditional branch; a conditional branch can be followed only by an
-        // unconditional branch or fallthrough. Otherwise, if only one branch,
-        // it may be an unconditional branch, a fallthrough, a return, or a
-        // trap. These conditions are verified by `is_ebb_basic()` during the
-        // verifier pass.
-        assert!(branches.len() <= 2);
-        if branches.len() == 2 {
-            assert!(self.data(branches[1]).opcode() == Opcode::Jump);
-        }
         // When considering code-motion opportunities, consider the current
-        // program point to be the first branch.
-        self.cur_inst = Some(branches[0]);
-        // Lower the first branch in ISLE.  This will automatically handle
-        // the second branch (if any) by emitting a two-way conditional branch.
+        // program point to be this branch.
+        self.cur_inst = Some(branch);
+
+        // Lower the branch in ISLE.
         backend
-            .lower_branch(self, branches[0], targets)
+            .lower_branch(self, branch, targets)
             .unwrap_or_else(|| {
                 panic!(
                     "should be implemented in ISLE: branch = `{}`",
-                    self.f.dfg.display_inst(branches[0]),
+                    self.f.dfg.display_inst(branch),
                 )
             });
-        let loc = self.srcloc(branches[0]);
+        let loc = self.srcloc(branch);
         self.finish_ir_inst(loc);
         // Add block param outputs for current block.
         self.lower_branch_blockparam_args(bindex);
@@ -941,17 +973,26 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
     }
 
     fn lower_branch_blockparam_args(&mut self, block: BlockIndex) {
-        for succ_idx in 0..self.vcode.block_order().succ_indices(block).len() {
+        // TODO: why not make `block_order` public?
+        for succ_idx in 0..self.vcode.block_order().succ_indices(block).1.len() {
             // Avoid immutable borrow by explicitly indexing.
-            let (inst, succ) = self.vcode.block_order().succ_indices(block)[succ_idx];
-            // Get branch args and convert to Regs.
-            let branch_args = self.f.dfg.inst_variable_args(inst);
+            let (opt_inst, succs) = self.vcode.block_order().succ_indices(block);
+            let inst = opt_inst.expect("lower_branch_blockparam_args called on a critical edge!");
+            let succ = succs[succ_idx];
+
+            // The use of `succ_idx` to index `branch_destination` is valid on the assumption that
+            // the traversal order defined in `visit_block_succs` mirrors the order returned by
+            // `branch_destination`. If that assumption is violated, the branch targets returned
+            // here will not match the clif.
+            let branches = self.f.dfg.insts[inst].branch_destination(&self.f.dfg.jump_tables);
+            let branch_args = branches[succ_idx].args_slice(&self.f.dfg.value_lists);
+
             let mut branch_arg_vregs: SmallVec<[Reg; 16]> = smallvec![];
             for &arg in branch_args {
                 let arg = self.f.dfg.resolve_aliases(arg);
                 let regs = self.put_value_in_regs(arg);
                 for &vreg in regs.regs() {
-                    let vreg = self.vcode.resolve_vreg_alias(vreg.into());
+                    let vreg = self.vcode.vcode.resolve_vreg_alias(vreg.into());
                     branch_arg_vregs.push(vreg.into());
                 }
             }
@@ -964,27 +1005,20 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         &self,
         bindex: BlockIndex,
         _bb: Block,
-        branches: &mut SmallVec<[Inst; 2]>,
         targets: &mut SmallVec<[MachLabel; 2]>,
-    ) {
-        branches.clear();
+    ) -> Option<Inst> {
         targets.clear();
-        let mut last_inst = None;
-        for &(inst, succ) in self.vcode.block_order().succ_indices(bindex) {
-            // Avoid duplicates: this ensures a br_table is only inserted once.
-            if last_inst != Some(inst) {
-                branches.push(inst);
-            } else {
-                debug_assert!(self.f.dfg.insts[inst].opcode() == Opcode::BrTable);
-                debug_assert!(branches.len() == 1);
-            }
-            last_inst = Some(inst);
-            targets.push(MachLabel::from_block(succ));
-        }
+        let (opt_inst, succs) = self.vcode.block_order().succ_indices(bindex);
+        targets.extend(succs.iter().map(|succ| MachLabel::from_block(*succ)));
+        opt_inst
     }
 
     /// Lower the function.
-    pub fn lower<B: LowerBackend<MInst = I>>(mut self, backend: &B) -> CodegenResult<VCode<I>> {
+    pub fn lower<B: LowerBackend<MInst = I>>(
+        mut self,
+        backend: &B,
+        ctrl_plane: &mut ControlPlane,
+    ) -> CodegenResult<VCode<I>> {
         trace!("about to lower function: {:?}", self.f);
 
         // Initialize the ABI object, giving it temps if requested.
@@ -1004,7 +1038,6 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         self.vcode.set_entry(BlockIndex::new(0));
 
         // Reused vectors for branch lowering.
-        let mut branches: SmallVec<[Inst; 2]> = SmallVec::new();
         let mut targets: SmallVec<[MachLabel; 2]> = SmallVec::new();
 
         // get a copy of the lowered order; we hold this separately because we
@@ -1026,10 +1059,9 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 
             // End branches.
             if let Some(bb) = lb.orig_block() {
-                self.collect_branches_and_targets(bindex, bb, &mut branches, &mut targets);
-                if branches.len() > 0 {
-                    self.lower_clif_branches(backend, bindex, bb, &branches, &targets)?;
-                    self.finish_ir_inst(self.srcloc(branches[0]));
+                if let Some(branch) = self.collect_branches_and_targets(bindex, bb, &mut targets) {
+                    self.lower_clif_branches(backend, bindex, bb, branch, &targets)?;
+                    self.finish_ir_inst(self.srcloc(branch));
                 }
             } else {
                 // If no orig block, this must be a pure edge block;
@@ -1037,7 +1069,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                 // according to the one successor, and pass them
                 // through; note that the successor must have an
                 // original block.
-                let (_, succ) = self.vcode.block_order().succ_indices(bindex)[0];
+                let (_, succs) = self.vcode.block_order().succ_indices(bindex);
+                let succ = succs[0];
 
                 let orig_succ = lowered_order[succ.index()];
                 let orig_succ = orig_succ
@@ -1061,7 +1094,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 
             // Original block body.
             if let Some(bb) = lb.orig_block() {
-                self.lower_clif_block(backend, bb)?;
+                self.lower_clif_block(backend, bb, ctrl_plane)?;
                 self.emit_value_label_markers_for_block_args(bb);
             }
 
@@ -1072,11 +1105,17 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             }
 
             self.finish_bb();
+
+            // Check for any deferred vreg-temp allocation errors, and
+            // bubble one up at this time if it exists.
+            if let Some(e) = self.vregs.take_deferred_error() {
+                return Err(e);
+            }
         }
 
         // Now that we've emitted all instructions into the
         // VCodeBuilder, let's build the VCode.
-        let vcode = self.vcode.build(self.allocatable, self.vregs);
+        let vcode = self.vcode.build(self.vregs);
         trace!("built vcode: {:?}", vcode);
 
         Ok(vcode)
@@ -1117,10 +1156,15 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             &GlobalValueData::Symbol {
                 ref name,
                 ref offset,
+                colocated,
                 ..
             } => {
                 let offset = offset.bits();
-                let dist = gvdata.maybe_reloc_distance().unwrap();
+                let dist = if colocated {
+                    RelocDistance::Near
+                } else {
+                    RelocDistance::Far
+                };
                 Some((name, dist, offset))
             }
             _ => None,
@@ -1145,7 +1189,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         self.f.rel_srclocs()[ir_inst]
     }
 
-    /// Get the number of inputs to the given IR instruction.
+    /// Get the number of inputs to the given IR instruction. This is a count only of the Value
+    /// arguments to the instruction: block arguments will not be included in this count.
     pub fn num_inputs(&self, ir_inst: Inst) -> usize {
         self.f.dfg.inst_args(ir_inst).len()
     }
@@ -1316,7 +1361,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 impl<'func, I: VCodeInst> Lower<'func, I> {
     /// Get a new temp.
     pub fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<Writable<Reg>> {
-        writable_value_regs(self.vregs.alloc(ty).unwrap())
+        writable_value_regs(self.vregs.alloc_with_deferred_error(ty))
     }
 
     /// Emit a machine instruction.
@@ -1380,5 +1425,19 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
     pub fn set_vreg_alias(&mut self, from: Reg, to: Reg) {
         trace!("set vreg alias: from {:?} to {:?}", from, to);
         self.vcode.set_vreg_alias(from, to);
+    }
+
+    /// Add a range fact to a register, if no other fact is present.
+    pub fn add_range_fact(&mut self, reg: Reg, bit_width: u16, min: u64, max: u64) {
+        if self.flags.enable_pcc() {
+            self.vregs.set_fact_if_missing(
+                reg.to_virtual_reg().unwrap(),
+                Fact::Range {
+                    bit_width,
+                    min,
+                    max,
+                },
+            );
+        }
     }
 }

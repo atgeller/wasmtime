@@ -9,27 +9,32 @@ repository = "https://github.com/bytecodealliance/wasmtime"
 publish = false
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
-cranelift-codegen = { workspace = true, features = ["testing_hooks"] }
+cranelift-codegen = { workspace = true, features = ["disas"] }
 cranelift-frontend = { workspace = true }
 cranelift-interpreter = { workspace = true }
 cranelift-native = { workspace = true }
 cranelift-reader = { workspace = true }
-cranelift-preopt = { workspace = true }
 cranelift-jit = { workspace = true, features = ["selinux-fix"] }
 cranelift-module = { workspace = true }
-file-per-thread-logger = "0.1.2"
-filecheck = "0.5.0"
+cranelift-control = { workspace = true }
+file-per-thread-logger = { workspace = true }
+filecheck = { workspace = true }
 gimli = { workspace = true }
 log = { workspace = true }
 num_cpus = "1.8.0"
 target-lexicon = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-similar = "2.1.0"
+similar = { workspace = true }
 wat.workspace = true
-toml = "0.5.9"
-serde = "1.0.94"
+toml = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
 cranelift-wasm.workspace = true
 wasmparser.workspace = true
 cranelift.workspace = true
+smallvec = { workspace = true }

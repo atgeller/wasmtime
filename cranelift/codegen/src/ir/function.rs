@@ -4,17 +4,13 @@
 //! instructions.
 
 use crate::entity::{PrimaryMap, SecondaryMap};
-use crate::ir;
-use crate::ir::JumpTables;
 use crate::ir::{
-    instructions::BranchInfo, Block, DynamicStackSlot, DynamicStackSlotData, DynamicType,
-    ExtFuncData, FuncRef, GlobalValue, GlobalValueData, Inst, InstructionData, JumpTable,
-    JumpTableData, Opcode, SigRef, StackSlot, StackSlotData, Table, TableData, Type,
+    self, pcc::Fact, Block, DataFlowGraph, DynamicStackSlot, DynamicStackSlotData,
+    DynamicStackSlots, DynamicType, ExtFuncData, FuncRef, GlobalValue, GlobalValueData, Inst,
+    JumpTable, JumpTableData, Layout, MemoryType, MemoryTypeData, Opcode, SigRef, Signature,
+    SourceLocs, StackSlot, StackSlotData, StackSlots, Table, TableData, Type,
 };
-use crate::ir::{DataFlowGraph, Layout, Signature};
-use crate::ir::{DynamicStackSlots, SourceLocs, StackSlots};
 use crate::isa::CallConv;
-use crate::value_label::ValueLabelsRanges;
 use crate::write::write_function;
 use crate::HashMap;
 #[cfg(feature = "enable-serde")]
@@ -34,7 +30,7 @@ use super::{RelSourceLoc, SourceLoc, UserExternalName};
 
 /// A version marker used to ensure that serialized clif ir is never deserialized with a
 /// different version of Cranelift.
-#[derive(Copy, Clone, Debug, PartialEq, Hash)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Hash)]
 pub struct VersionMarker;
 
 #[cfg(feature = "enable-serde")]
@@ -67,8 +63,11 @@ impl<'de> Deserialize<'de> for VersionMarker {
 
 /// Function parameters used when creating this function, and that will become applied after
 /// compilation to materialize the final `CompiledCode`.
-#[derive(Clone)]
-#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+#[derive(Clone, PartialEq)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub struct FunctionParameters {
     /// The first `SourceLoc` appearing in the function, serving as a base for every relative
     /// source loc in the function.
@@ -150,7 +149,10 @@ impl FunctionParameters {
 /// Additionally, these fields can be the same for two functions that would be compiled the same
 /// way, and finalized by applying `FunctionParameters` onto their `CompiledCodeStencil`.
 #[derive(Clone, PartialEq, Hash)]
-#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub struct FunctionStencil {
     /// A version marker used to ensure that serialized clif ir is never deserialized with a
     /// different version of Cranelift.
@@ -170,11 +172,14 @@ pub struct FunctionStencil {
     /// Global values referenced.
     pub global_values: PrimaryMap<ir::GlobalValue, ir::GlobalValueData>,
 
+    /// Global value proof-carrying-code facts.
+    pub global_value_facts: SecondaryMap<ir::GlobalValue, Option<Fact>>,
+
+    /// Memory types for proof-carrying code.
+    pub memory_types: PrimaryMap<ir::MemoryType, ir::MemoryTypeData>,
+
     /// Tables referenced.
     pub tables: PrimaryMap<ir::Table, ir::TableData>,
-
-    /// Jump tables used in this function.
-    pub jump_tables: JumpTables,
 
     /// Data flow graph containing the primary definition of all instructions, blocks and values.
     pub dfg: DataFlowGraph,
@@ -202,8 +207,9 @@ impl FunctionStencil {
         self.sized_stack_slots.clear();
         self.dynamic_stack_slots.clear();
         self.global_values.clear();
+        self.global_value_facts.clear();
+        self.memory_types.clear();
         self.tables.clear();
-        self.jump_tables.clear();
         self.dfg.clear();
         self.layout.clear();
         self.srclocs.clear();
@@ -212,7 +218,7 @@ impl FunctionStencil {
 
     /// Creates a jump table in the function, to be used by `br_table` instructions.
     pub fn create_jump_table(&mut self, data: JumpTableData) -> JumpTable {
-        self.jump_tables.push(data)
+        self.dfg.jump_tables.push(data)
     }
 
     /// Creates a sized stack slot in the function, to be used by `stack_load`, `stack_store`
@@ -237,7 +243,12 @@ impl FunctionStencil {
         self.global_values.push(data)
     }
 
-    /// Find the global dyn_scale value associated with given DynamicType
+    /// Declares a memory type for use by the function.
+    pub fn create_memory_type(&mut self, data: MemoryTypeData) -> MemoryType {
+        self.memory_types.push(data)
+    }
+
+    /// Find the global dyn_scale value associated with given DynamicType.
     pub fn get_dyn_scale(&self, ty: DynamicType) -> GlobalValue {
         self.dfg.dynamic_types.get(ty).unwrap().dynamic_scale
     }
@@ -277,51 +288,13 @@ impl FunctionStencil {
         self.dfg.collect_debug_info();
     }
 
-    /// Changes the destination of a jump or branch instruction.
-    /// Does nothing if called with a non-jump or non-branch instruction.
-    ///
-    /// Note that this method ignores multi-destination branches like `br_table`.
-    pub fn change_branch_destination(&mut self, inst: Inst, new_dest: Block) {
-        match self.dfg.insts[inst].branch_destination_mut() {
-            None => (),
-            Some(inst_dest) => *inst_dest = new_dest,
-        }
-    }
-
     /// Rewrite the branch destination to `new_dest` if the destination matches `old_dest`.
     /// Does nothing if called with a non-jump or non-branch instruction.
-    ///
-    /// Unlike [change_branch_destination](FunctionStencil::change_branch_destination), this method
-    /// rewrite the destinations of multi-destination branches like `br_table`.
     pub fn rewrite_branch_destination(&mut self, inst: Inst, old_dest: Block, new_dest: Block) {
-        match self.dfg.analyze_branch(inst) {
-            BranchInfo::SingleDest(dest, ..) => {
-                if dest == old_dest {
-                    self.change_branch_destination(inst, new_dest);
-                }
+        for dest in self.dfg.insts[inst].branch_destination_mut(&mut self.dfg.jump_tables) {
+            if dest.block(&self.dfg.value_lists) == old_dest {
+                dest.set_block(new_dest, &mut self.dfg.value_lists)
             }
-
-            BranchInfo::Table(table, default_dest) => {
-                self.jump_tables[table].iter_mut().for_each(|entry| {
-                    if *entry == old_dest {
-                        *entry = new_dest;
-                    }
-                });
-
-                if default_dest == Some(old_dest) {
-                    match &mut self.dfg.insts[inst] {
-                        InstructionData::BranchTable { destination, .. } => {
-                            *destination = new_dest;
-                        }
-                        _ => panic!(
-                            "Unexpected instruction {} having default destination",
-                            self.dfg.display_inst(inst)
-                        ),
-                    }
-                }
-            }
-
-            BranchInfo::NotABranch => {}
         }
     }
 
@@ -354,7 +327,17 @@ impl FunctionStencil {
     pub fn is_leaf(&self) -> bool {
         // Conservative result: if there's at least one function signature referenced in this
         // function, assume it is not a leaf.
-        self.dfg.signatures.is_empty()
+        let has_signatures = !self.dfg.signatures.is_empty();
+
+        // Under some TLS models, retrieving the address of a TLS variable requires calling a
+        // function. Conservatively assume that any function that references a tls global value
+        // is not a leaf.
+        let has_tls = self.global_values.values().any(|gv| match gv {
+            GlobalValueData::Symbol { tls, .. } => *tls,
+            _ => false,
+        });
+
+        !has_signatures && !has_tls
     }
 
     /// Replace the `dst` instruction's data with the `src` instruction's data
@@ -396,7 +379,7 @@ impl FunctionStencil {
 
 /// Functions can be cloned, but it is not a very fast operation.
 /// The clone will have all the same entity numbers as the original.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Function {
     /// Name of this function.
@@ -438,8 +421,9 @@ impl Function {
                 sized_stack_slots: StackSlots::new(),
                 dynamic_stack_slots: DynamicStackSlots::new(),
                 global_values: PrimaryMap::new(),
+                global_value_facts: SecondaryMap::new(),
+                memory_types: PrimaryMap::new(),
                 tables: PrimaryMap::new(),
-                jump_tables: PrimaryMap::new(),
                 dfg: DataFlowGraph::new(),
                 layout: Layout::new(),
                 srclocs: SecondaryMap::new(),
@@ -463,15 +447,7 @@ impl Function {
 
     /// Return an object that can display this function with correct ISA-specific annotations.
     pub fn display(&self) -> DisplayFunction<'_> {
-        DisplayFunction(self, Default::default())
-    }
-
-    /// Return an object that can display this function with correct ISA-specific annotations.
-    pub fn display_with<'a>(
-        &'a self,
-        annotations: DisplayFunctionAnnotations<'a>,
-    ) -> DisplayFunction<'a> {
-        DisplayFunction(self, annotations)
+        DisplayFunction(self)
     }
 
     /// Sets an absolute source location for the given instruction.
@@ -502,15 +478,8 @@ impl Function {
     }
 }
 
-/// Additional annotations for function display.
-#[derive(Default)]
-pub struct DisplayFunctionAnnotations<'a> {
-    /// Enable value labels annotations.
-    pub value_ranges: Option<&'a ValueLabelsRanges>,
-}
-
-/// Wrapper type capable of displaying a `Function` with correct ISA annotations.
-pub struct DisplayFunction<'a>(&'a Function, DisplayFunctionAnnotations<'a>);
+/// Wrapper type capable of displaying a `Function`.
+pub struct DisplayFunction<'a>(&'a Function);
 
 impl<'a> fmt::Display for DisplayFunction<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {

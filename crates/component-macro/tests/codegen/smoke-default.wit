@@ -1,5 +1,5 @@
+package foo:foo;
+
 world the-world {
-  default export interface {
-    y: func()
-  }
+  export y: func();
 }

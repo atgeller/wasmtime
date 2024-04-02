@@ -50,6 +50,9 @@
 //! `WasiCtx::builder(...)` function. The
 //! `wasi_cap_std_sync::WasiCtxBuilder::new()` function uses this public
 //! interface to plug in its own implementations of each of these resources.
+
+#![warn(clippy::cast_sign_loss)]
+
 pub mod clocks;
 mod ctx;
 pub mod dir;
@@ -69,5 +72,5 @@ pub use dir::WasiDir;
 pub use error::{Error, ErrorExt, I32Exit};
 pub use file::WasiFile;
 pub use sched::{Poll, WasiSched};
-pub use string_array::StringArrayError;
+pub use string_array::{StringArray, StringArrayError};
 pub use table::Table;

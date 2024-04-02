@@ -1,5 +1,5 @@
 use cap_std::time::Duration;
-use rustix::io::{PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags};
 use std::convert::TryInto;
 use wasi_common::sched::subscription::{RwEventFlags, Subscription};
 use wasi_common::{sched::Poll, Error, ErrorExt};
@@ -44,7 +44,7 @@ pub async fn poll_oneoff<'a>(poll: &mut Poll<'a>) -> Result<(), Error> {
             poll_fds = tracing::field::debug(&pollfds),
             "poll"
         );
-        match rustix::io::poll(&mut pollfds, poll_timeout) {
+        match rustix::event::poll(&mut pollfds, poll_timeout) {
             Ok(ready) => break ready,
             Err(rustix::io::Errno::INTR) => continue,
             Err(err) => return Err(std::io::Error::from(err).into()),
@@ -55,7 +55,7 @@ pub async fn poll_oneoff<'a>(poll: &mut Poll<'a>) -> Result<(), Error> {
             let revents = pollfd.revents();
             let (nbytes, rwsub) = match rwsub {
                 Subscription::Read(sub) => {
-                    let ready = sub.file.num_ready_bytes().await?;
+                    let ready = sub.file.num_ready_bytes()?;
                     (std::cmp::max(ready, 1), sub)
                 }
                 Subscription::Write(sub) => (0, sub),

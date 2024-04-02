@@ -83,6 +83,7 @@ pub fn map_reg(reg: Reg) -> Result<Register, RegisterMappingError> {
     match reg.class() {
         RegClass::Int => Ok(GPR_MAP[reg.to_real_reg().unwrap().hw_enc() as usize]),
         RegClass::Float => Ok(VR_MAP[reg.to_real_reg().unwrap().hw_enc() as usize]),
+        RegClass::Vector => unreachable!(),
     }
 }
 
@@ -107,7 +108,6 @@ mod tests {
     use crate::settings::{builder, Flags};
     use crate::Context;
     use gimli::write::Address;
-    use std::str::FromStr;
     use target_lexicon::triple;
 
     #[test]
@@ -122,7 +122,9 @@ mod tests {
             Some(StackSlotData::new(StackSlotKind::ExplicitSlot, 64)),
         ));
 
-        let code = context.compile(&*isa).expect("expected compilation");
+        let code = context
+            .compile(&*isa, &mut Default::default())
+            .expect("expected compilation");
 
         let fde = match code
             .create_unwind_info(isa.as_ref())
@@ -164,7 +166,9 @@ mod tests {
             Some(StackSlotData::new(StackSlotKind::ExplicitSlot, 64)),
         ));
 
-        let code = context.compile(&*isa).expect("expected compilation");
+        let code = context
+            .compile(&*isa, &mut Default::default())
+            .expect("expected compilation");
 
         let fde = match code
             .create_unwind_info(isa.as_ref())
@@ -194,8 +198,7 @@ mod tests {
 
         let mut pos = FuncCursor::new(&mut func);
         pos.insert_block(block0);
-        pos.ins().brnz(v0, block2, &[]);
-        pos.ins().jump(block1, &[]);
+        pos.ins().brif(v0, block2, &[], block1, &[]);
 
         pos.insert_block(block1);
         pos.ins().return_(&[]);
